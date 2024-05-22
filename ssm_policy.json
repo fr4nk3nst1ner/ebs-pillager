@@ -1,0 +1,24 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ssm:DescribeInstanceInformation",
+                "ssm:ListAssociations",
+                "ssm:ListInstanceAssociations",
+                "ssm:ListCommandInvocations",
+                "ssm:ListCommands",
+                "ssm:SendCommand",
+                "ssm:UpdateInstanceInformation",
+                "ssm:GetMessages",
+                "ec2messages:GetMessages",
+                "ssmmessages:CreateControlChannel",
+                "ec2messages:AcknowledgeMessage",
+                "ec2messages:SendReply"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+
