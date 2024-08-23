@@ -1,4 +1,4 @@
-# EBS Pillaging 
+# EBS Pillager
 
 This is an EC2 EBS post-exploitation script. The end goal is to make your life a lot easier if you get admin in EC2 while on an AWS pen test and are interested in pillaging other instances' EBS volumes. It automates the process of creating snapshots of EBS volumes, transferring them between AWS accounts if necessary, mounting them on the attacker-controlled EC2 instance, and running Trufflehog on the EBS volume's mounted snapshot. 
 
