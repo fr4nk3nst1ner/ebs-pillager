@@ -66,17 +66,17 @@ This script automates the creation of an EC2 instance in a specified AWS region.
 
 #### Parameters
 
-- `--profile`: The AWS CLI profile to use for authentication (e.g., `jstinesse`).
+- `--profile`: The AWS CLI profile to use for authentication 
 - `--region`: The AWS region where the instance will be created (e.g., `us-east-1`).
 - `--instance-profile`: The IAM instance profile to attach to the instance (e.g., `SMInstanceProfile`).
 - `--ip-allowlist`: The IP address (or range) to allow SSH access (e.g., `1.2.3.4/32`). You can use `curl -s ifconfig.me` to automatically use your current public IP.
-- `--key`: The name of the SSH key pair to associate with the instance (e.g., `jstinesse`).
-- `--image-id`: The ID of the Amazon Machine Image (AMI) to use for the instance (e.g., `ami-0e3a6d8ff4c8fe246`).
+- `--key`: The name of the SSH key pair to associate with the instance 
+- `--image-id`: The ID of the Amazon Machine Image (AMI) to use for the instance 
 - `--instance-type`: The type of instance to create (e.g., `t3.micro`).
 
 #### Example
 
-`bash create_ec2.sh --profile jstinesse --region us-east-1 --instance-profile SSMInstanceProfile --ip-allowlist `curl -s ifconfig.me`/32 --key jstinesse --image-id ami-0e3a6d8ff4c8fe246 --instance-type t3.micro`
+`bash create_ec2.sh --profile YOUR_PROFILE --region us-east-1 --instance-profile SSMInstanceProfile --ip-allowlist `curl -s ifconfig.me`/32 --key YOUR_KEY --image-id YOUR_AMI_ID --instance-type t3.micro`
 
 This command will create an EC2 instance with the tag `TrufflehogTesting` applied to both the instance and its associated EBS volume.
 
@@ -90,12 +90,12 @@ This script automates the deletion of all EC2 instances, EBS volumes, and snapsh
 
 #### Parameters
 
-- `--profile`: The AWS CLI profile to use for authentication (e.g., `jstinesse`).
-- `--region`: The AWS region where the resources are located (e.g., `us-east-1`).
+- `--profile`: The AWS CLI profile to use for authentication  
+- `--region`: The AWS region where the resources are located  
 
 #### Example
 
-`bash delete_all.sh --profile jstinesse --region us-east-1`
+`bash delete_all.sh --profile YOUR_PROFILE --region us-east-1`
 
 This command will delete all EC2 instances, EBS volumes, and snapshots in the specified region that have been tagged with `TrufflehogTesting`.
 
