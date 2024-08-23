@@ -1,6 +1,6 @@
-# EBS Pillaging Script
+# EBS Pillaging 
 
-This script is an EC2 EBS post-exploitation script. It's goal is to automate the process of creating snapshots of EBS volumes, transferring them between AWS accounts if necessary, mounting them on the attacker-controlled EC2 instance, and running Trufflehog on the EBS volume's mounted snapshot. 
+This is an EC2 EBS post-exploitation script. The end goal is to make your life a lot easier if you get admin in EC2 while on an AWS pen test and are interested in pillaging other instances' EBS volumes. It automates the process of creating snapshots of EBS volumes, transferring them between AWS accounts if necessary, mounting them on the attacker-controlled EC2 instance, and running Trufflehog on the EBS volume's mounted snapshot. 
 
 ## Features
 - **Snapshot Creation**: Create snapshots of the root EBS volume of an EC2 instance.
@@ -116,7 +116,10 @@ This command will delete all EC2 instances, EBS volumes, and snapshots in the sp
 - **AWS CLI**: The scripts require the AWS CLI to be installed and configured with appropriate credentials.
 - **JQ**: The `jq` command-line tool is used to parse JSON output from the AWS CLI.
 
+## To Do
+
+- [ ] Run tests with encrypted EBS volumes with various roles / AuthZ levels 
+- [ ] Add functionality to work with specific KMS keys for decrypting volumes if encrypted 
 
 ## License
 This project is licensed under the MIT License.
-
