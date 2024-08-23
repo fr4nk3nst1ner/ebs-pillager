@@ -76,6 +76,7 @@ instance_info=$(aws ec2 run-instances \
     --instance-type "$instance_type" \
     --key-name "$key_name" \
     --iam-instance-profile Name="$instance_profile" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=TrufflehogTesting}]" "ResourceType=volume,Tags=[{Key=Name,Value=TrufflehogTesting}]" \
     --query 'Instances[0].[InstanceId,PublicIpAddress,SecurityGroups[0].GroupId]' \
     --output json)
 
@@ -89,16 +90,28 @@ if [[ -n "$instance_id" && -n "$security_group_id" ]]; then
     echo "Instance launched with ID: $instance_id"
     echo "Security Group ID: $security_group_id"
 
-    # Authorize port 22 for the specified IP address
-    aws ec2 authorize-security-group-ingress \
+    # Check if the rule already exists
+    rule_exists=$(aws ec2 describe-security-groups \
         --profile "$profile" \
         --region "$region" \
-        --group-id "$security_group_id" \
-        --protocol tcp \
-        --port 22 \
-        --cidr "$ip_allowlist"
+        --group-ids "$security_group_id" \
+        --query "SecurityGroups[0].IpPermissions[?FromPort==\`22\` && ToPort==\`22\` && IpProtocol==\`tcp\` && IpRanges[?CidrIp=='$ip_allowlist']].IpRanges[*].CidrIp" \
+        --output text)
 
-    echo "Port 22 (SSH) authorized for IP address $ip_allowlist."
+    if [[ -z "$rule_exists" ]]; then
+        # Authorize port 22 for the specified IP address if the rule doesn't exist
+        aws ec2 authorize-security-group-ingress \
+            --profile "$profile" \
+            --region "$region" \
+            --group-id "$security_group_id" \
+            --protocol tcp \
+            --port 22 \
+            --cidr "$ip_allowlist"
+
+        echo "Port 22 (SSH) authorized for IP address $ip_allowlist."
+    else
+        echo "Port 22 (SSH) rule for IP address $ip_allowlist already exists."
+    fi
 
     # Start the instance
     aws ec2 start-instances --profile "$profile" --region "$region" --instance-ids "$instance_id"

