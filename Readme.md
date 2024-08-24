@@ -123,10 +123,14 @@ This command will delete all EC2 instances, EBS volumes, and snapshots in the sp
 - AWS cli
 - jq
 
-## To Do
+## Bug Fixes (lazily not filing issues)
+- [ ] Fix bug where the mount host's own filesystem gets mounted rather than the target ec2 
+- [ ] Fix issue where snapshot transfer is failing 
 
+## To Do
 - [ ] Run tests with encrypted EBS volumes with various roles / AuthZ levels 
 - [ ] Add functionality to work with specific KMS keys for decrypting volumes if encrypted 
+- [ ] Unmount volume after trufflehog completes 
 
 ## License
 This project is licensed under the MIT License.
