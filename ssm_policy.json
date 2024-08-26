@@ -10,14 +10,57 @@
                 "ssm:ListCommandInvocations",
                 "ssm:ListCommands",
                 "ssm:SendCommand",
+                "ssm:GetCommandInvocation",    
+                "ssm:GetDocument",             
+                "ssm:DescribeDocument",
+                "ssm:ListDocuments",
                 "ssm:UpdateInstanceInformation",
-                "ssm:GetMessages",
+                "ssm:DescribeInstanceProperties",
+                "ssm:GetParameters",
+                "ssm:GetParameter",
+                "ssm:PutParameter",
+                "ssm:DeleteParameter",
+                "ssm:GetParameterHistory",
+                "ssm:GetPatchBaseline",
+                "ssm:GetDeployablePatchSnapshotForInstance",
+                "ssm:DescribeMaintenanceWindowExecutionTasks",
+                "ssm:DescribeMaintenanceWindows",
+                "ssm:DescribeAutomationExecutions",
+                "ssm:GetAutomationExecution",
+                "ssm:DescribeAutomationStepExecutions",
+                "ssm:CancelCommand",
+                "ssm:GetServiceSetting",
+                "ssm:DescribeEffectiveInstanceAssociations",
+                "ssm:GetCalendarState",
+                "ssm:DescribeMaintenanceWindowExecutions",
+                "ssm:DescribeMaintenanceWindowExecutionTaskInvocations",
+                "ssm:GetMaintenanceWindowExecution",
+                "ssm:StartAssociationsOnce",
+                "ssm:GetOpsSummary",
+                "ssm:ListInventoryEntries",
+                "ssm:DescribeInstancePatchStates",
+                "ssm:DescribeInstancePatchStatesForPatchGroup",
+                "ssm:ListComplianceSummaries",
+                "ssm:GetDeployablePatchSnapshotForInstance",
+                "ssm:GetAutomationExecution",
+                "ssm:GetPatchBaseline",
+                "ssm:DescribeDocumentParameters"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
                 "ec2messages:GetMessages",
-                "ssmmessages:CreateControlChannel",
                 "ec2messages:AcknowledgeMessage",
-                "ec2messages:SendReply"
+                "ec2messages:SendReply",
+                "ssmmessages:CreateControlChannel",
+                "ssmmessages:CreateDataChannel",
+                "ssmmessages:OpenControlChannel",
+                "ssmmessages:OpenDataChannel"
             ],
             "Resource": "*"
         }
     ]
 }
+

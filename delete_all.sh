@@ -48,8 +48,20 @@ delete_volumes() {
       exit 1
     fi
 
-    # Loop through each volume and delete it
+    # Determine the root volume by checking the block devices
+    root_volume=$(aws ec2 describe-instances \
+        --profile "$profile" \
+        --region "$region" \
+        --query 'Reservations[].Instances[].BlockDeviceMappings[?DeviceName==`/dev/xvda`].Ebs.VolumeId' \
+        --output text)
+
+    # Loop through each volume and delete it, skipping the root filesystem volume
     for volume_id in $volume_ids; do
+        if [ "$volume_id" == "$root_volume" ]; then
+            echo "Skipping root filesystem volume $volume_id"
+            continue
+        fi
+        
         echo "Deleting volume $volume_id..."
         aws ec2 delete-volume \
             --profile "$profile" \
@@ -61,7 +73,7 @@ delete_volumes() {
             echo "Deleted volume $volume_id"
         fi
     done
-    echo "All EBS volumes with the tag $tag_key=$tag_value have been deleted."
+    echo "All non-root EBS volumes with the tag $tag_key=$tag_value have been deleted."
 }
 
 # Function to delete snapshots with the "TrufflehogTesting" tag owned by your account

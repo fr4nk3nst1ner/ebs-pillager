@@ -21,13 +21,7 @@ This scenario involves creating a snapshot and mounting the volume within the sa
 python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-09639c1f8c7408b0d --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json
 ```
 
-### Cross-Account Abuse Without Snapshot Transfer
-In this scenario, the snapshot is created in one AWS account but is not transferred to the destination account. The volume is created and mounted within the source account.
-```
-python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-062fb4910e81569b1 --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json
-```
-
-### Cross-Account Abuse with Snapshot Transfer
+### Cross-Account Abuse via Snapshot Transfer
 This scenario involves creating a snapshot in one AWS account, transferring it to another account, and then creating and mounting the volume in the destination account.
 
 ```
@@ -124,13 +118,19 @@ This command will delete all EC2 instances, EBS volumes, and snapshots in the sp
 - jq
 
 ## Bug Fixes (lazily not filing issues)
-- [ ] Fix bug where the mount host's own filesystem gets mounted rather than the target ec2 
-- [ ] Fix issue where snapshot transfer is failing 
+- [x] Fix bug where the mount host's own filesystem gets mounted rather than the target ec2 
+- [x] Fix issue where snapshot transfer is failing 
+- [x] Unmount volume from ec2 mount host after trufflehog completes 
+- [ ] Fix error where volume doesn't get detached from mount host after trufflehog run
 
 ## To Do
 - [ ] Run tests with encrypted EBS volumes with various roles / AuthZ levels 
-- [ ] Add functionality to work with specific KMS keys for decrypting volumes if encrypted 
-- [ ] Unmount volume after trufflehog completes 
+- [ ] Add functionality to work with specied KMS keys for decrypting volumes if encrypted 
+- [ ] Clean up dead, unnecessary code and libraries 
+- [ ] Add interactive mode 
+- [ ] Clean up cli arguments to be more meaningful / appropriately named 
+- [ ] Investigate way of downloading a snapshot img for offline pillaging 
+- [ ] Add argument to specify log levels (e.g., debug, info)
 
 ## License
 This project is licensed under the MIT License.

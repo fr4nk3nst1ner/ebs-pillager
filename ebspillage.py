@@ -1,4 +1,5 @@
 import boto3
+import botocore
 import os
 import subprocess
 import logging
@@ -73,7 +74,6 @@ def create_snapshot(ec2_client, instance_id, profile_name, region_name):
     """Create a snapshot of the root volume of the specified EC2 instance."""
     logging.info(f"Creating snapshot for instance {instance_id} using client in region {region_name} and profile {profile_name}")
     try:
-        # Use the provided session for the specified profile and region
         session = boto3.Session(profile_name=profile_name, region_name=region_name)
         ec2_client = session.client('ec2')
 
@@ -85,8 +85,6 @@ def create_snapshot(ec2_client, instance_id, profile_name, region_name):
         instances = reservations[0].get('Instances', [])
         if not instances:
             raise ValueError(f"No instances found in reservation for instance {instance_id}")
-
-        availability_zone = instances[0]['Placement']['AvailabilityZone']
 
         root_device = instances[0].get('RootDeviceName')
         if not root_device:
@@ -105,6 +103,9 @@ def create_snapshot(ec2_client, instance_id, profile_name, region_name):
                 'Tags': [{'Key': 'Name', 'Value': 'TrufflehogTesting'}]
             }]
         )
+        
+        # Wait for snapshot completion
+        logging.info(f"Waiting for snapshot {snapshot['SnapshotId']} to complete...")
         ec2_client.get_waiter('snapshot_completed').wait(SnapshotIds=[snapshot['SnapshotId']])
         
         logging.info(f"Snapshot {snapshot['SnapshotId']} created successfully.")
@@ -114,34 +115,56 @@ def create_snapshot(ec2_client, instance_id, profile_name, region_name):
         logging.error(f"Failed to create snapshot for instance {instance_id}: {str(e)}")
         return None
 
+def wait_for_snapshot_availability(ec2_client, snapshot_id):
+    """Wait for the snapshot to be available."""
+    retries = 5
+    for attempt in range(retries):
+        try:
+            snapshot = ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])['Snapshots'][0]
+            if snapshot['State'] == 'completed':
+                logging.info(f"Snapshot {snapshot_id} is now available.")
+                return True
+            else:
+                logging.info(f"Snapshot {snapshot_id} is in {snapshot['State']} state. Retrying...")
+        except Exception as e:
+            logging.error(f"Error while checking snapshot availability: {str(e)}")
+        
+        time.sleep(30)  # Wait before retrying
+    
+    logging.error(f"Snapshot {snapshot_id} did not become available after {retries} attempts.")
+    return False
+
 def transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot_id):
     """Transfer EBS snapshot from source account to destination account and create a volume in the destination account."""
-    def json_serialize(obj):
-        """JSON serializer for objects not serializable by default json code"""
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        raise TypeError("Type not serializable")
-
     try:
         src_session = boto3.Session(profile_name=src_profile, region_name=src_region)
         dst_session = boto3.Session(profile_name=dst_profile, region_name=dst_region)
 
-        src_account_id = src_session.client('sts').get_caller_identity()['Account']
-        dst_account_id = dst_session.client('sts').get_caller_identity()['Account']
-
-        if src_account_id == dst_account_id:
-            logging.info("Source and destination accounts are the same. Skipping snapshot transfer.")
-            return snapshot_id
-
         ec2_src = src_session.client('ec2')
         ec2_dst = dst_session.client('ec2')
+        
+        # Retrieve the destination account ID using the STS client
+        sts_client = dst_session.client('sts')
+        dst_account_id = sts_client.get_caller_identity()['Account']
+        logging.info(f"Destination account ID determined: {dst_account_id}")
 
-        response = ec2_src.describe_snapshots(SnapshotIds=[snapshot_id])
-        source_snapshot = response['Snapshots'][0]
+        # Step 1: Modify snapshot attribute to allow destination account to copy the snapshot
+        logging.info(f"Modifying snapshot {snapshot_id} attributes to allow copying by account {dst_account_id}...")
+        ec2_src.modify_snapshot_attribute(
+            SnapshotId=snapshot_id,
+            Attribute='createVolumePermission',
+            OperationType='add',
+            UserIds=[dst_account_id]
+        )
+        logging.info(f"Snapshot {snapshot_id} permission modified successfully.")
 
-        logging.info(f"Source snapshot details: {json.dumps(source_snapshot, default=json_serialize, indent=4)}")
+        # Step 2: Wait for the snapshot to be fully available before copying
+        if not wait_for_snapshot_availability(ec2_src, snapshot_id):
+            logging.error("Source snapshot is not fully available. Aborting operation.")
+            return None
 
-        # Copy the snapshot to the destination account
+        # Step 3: Copy the snapshot to the destination account
+        logging.info(f"Copying snapshot {snapshot_id} to destination account {dst_profile}...")
         copied_snapshot = ec2_dst.copy_snapshot(
             SourceSnapshotId=snapshot_id,
             SourceRegion=src_region,
@@ -155,23 +178,27 @@ def transfer_snapshot(src_profile, dst_profile, src_region, dst_region, snapshot
         copied_snapshot_id = copied_snapshot['SnapshotId']
         logging.info(f"Snapshot {copied_snapshot_id} transferred from {src_profile} to {dst_profile}.")
 
-        # Wait for the copied snapshot to become available, with retries
-        retries = 5
+        # Step 4: Wait for the copied snapshot to become available, with retries
+        retries = 10  # Increase the number of retries
+        delay = 60    # Increase the delay between retries to 60 seconds
         for attempt in range(retries):
             try:
-                ec2_dst.get_waiter('snapshot_completed').wait(SnapshotIds=[copied_snapshot_id])
-                logging.info(f"Snapshot {copied_snapshot_id} is now available.")
-                break
-            except Exception as e:
-                logging.error(f"Snapshot copy attempt {attempt + 1} failed: {str(e)}")
-                if attempt < retries - 1:
-                    logging.info("Retrying snapshot copy...")
-                    time.sleep(30)  # Wait before retrying
+                snapshot = ec2_dst.describe_snapshots(SnapshotIds=[copied_snapshot_id])['Snapshots'][0]
+                if snapshot['State'] == 'completed':
+                    logging.info(f"Snapshot {copied_snapshot_id} is now available.")
+                    break
                 else:
-                    logging.error(f"Snapshot transfer failed after {retries} attempts.")
-                    return None
+                    logging.info(f"Snapshot {copied_snapshot_id} is in {snapshot['State']} state. Retrying...")
+            except Exception as e:
+                logging.error(f"Error while waiting for snapshot {copied_snapshot_id}: {str(e)}")
 
-        # Create the volume in the destination account from the copied snapshot
+            time.sleep(delay)
+
+        else:
+            logging.error(f"Snapshot {copied_snapshot_id} did not become available after {retries} attempts.")
+            return None
+
+        # Step 5: Create the volume in the destination account from the copied snapshot
         dst_volume_id = create_volume_in_destination_account(ec2_dst, copied_snapshot_id, dst_profile, dst_region)
         return dst_volume_id  # Return the new volume ID in the destination account
 
@@ -183,8 +210,10 @@ def create_volume_in_destination_account(ec2_client, snapshot_id, profile_name, 
     """Create a volume from the copied snapshot in the destination account."""
     logging.info(f"Creating volume from snapshot {snapshot_id} in the destination account {profile_name}...")
     try:
-        # Create the volume using the correct availability zone in the destination account
-        availability_zone = ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])['Snapshots'][0]['AvailabilityZone']
+        # Ensure that the volume is created in the correct availability zone
+        # Retrieve the list of availability zones in the destination region
+        availability_zones = ec2_client.describe_availability_zones()['AvailabilityZones']
+        availability_zone = availability_zones[0]['ZoneName']  # Default to the first AZ
 
         volume = ec2_client.create_volume(
             SnapshotId=snapshot_id,
@@ -209,7 +238,7 @@ def create_volume_in_destination_account(ec2_client, snapshot_id, profile_name, 
     except Exception as e:
         logging.error(f"Failed to create volume in destination account: {str(e)}")
         return None
-
+    
 def find_available_device(ec2_client, instance_id):
     """Find an available device name on the EC2 instance."""
     try:
@@ -262,7 +291,7 @@ def create_volume(ec2_client, snapshot_id, instance_id, is_src_profile=True):
         ec2_client.get_waiter('volume_available').wait(VolumeIds=[dst_volume_id])
 
         # Add a longer delay to ensure the volume is fully registered and recognized across AWS
-        logging.info("Waiting additional time for the volume to be fully registered...")
+        logging.info("Waiting additional time for the volume to be fully registered, sleeping 30s...")
         time.sleep(30)  # Increase delay to 30 seconds or more if needed
 
         # Validate the volume exists in the destination account before attempting to attach
@@ -277,31 +306,50 @@ def create_volume(ec2_client, snapshot_id, instance_id, is_src_profile=True):
         logging.error(f"Failed to create volume from snapshot: {str(e)}")
         return None
 
-def delete_snapshot_and_volume(ec2_client, src_snapshot_id, dst_snapshot_id, dst_volume_id, retain=False):
+def delete_snapshot_and_volume(ec2_client_src, ec2_client_dst, src_snapshot_id, dst_snapshot_id, dst_volume_id, retain=False):
     """Delete the specified snapshots and EBS volume."""
     time.sleep(10)  # Delay before deletion
 
     try:
-        # Check volume state and attachments for the destination volume
-        volume_info = ec2_client.describe_volumes(VolumeIds=[dst_volume_id])
+        # Ensure the correct client (dst profile) is used to describe and delete the volume
+        logging.info(f"Checking volume state and attachments for volume {dst_volume_id} in the destination account...")
+        volume_info = ec2_client_dst.describe_volumes(VolumeIds=[dst_volume_id])
         attachments = volume_info['Volumes'][0]['Attachments']
         
         if attachments:
             # Volume is attached, force detach it
-            ec2_client.detach_volume(VolumeId=dst_volume_id, Force=True)
+            ec2_client_dst.detach_volume(VolumeId=dst_volume_id, Force=True)
             logging.info(f"Volume {dst_volume_id} forcefully detached.")
 
+            # Wait for the volume to be fully detached
+            logging.info(f"Waiting for volume {dst_volume_id} to be fully detached...")
+            ec2_client_dst.get_waiter('volume_available').wait(VolumeIds=[dst_volume_id])
+            logging.info(f"Volume {dst_volume_id} is now fully detached and available for deletion.")
+
         # Delete the destination volume
-        ec2_client.delete_volume(VolumeId=dst_volume_id)
-        logging.info(f"Deleted volume {dst_volume_id} in --dst-profile account.")
+        ec2_client_dst.delete_volume(VolumeId=dst_volume_id)
+        logging.info(f"Deleted volume {dst_volume_id} in destination account.")
 
         if not retain:
-            # Delete the source and destination snapshots
-            ec2_client.delete_snapshot(SnapshotId=src_snapshot_id)
-            logging.info(f"Deleted snapshot {src_snapshot_id} in --src-profile account.")
-            
-            ec2_client.delete_snapshot(SnapshotId=dst_snapshot_id)
-            logging.info(f"Deleted snapshot {dst_snapshot_id} in --dst-profile account.")
+            # Delete the source snapshot
+            try:
+                ec2_client_src.delete_snapshot(SnapshotId=src_snapshot_id)
+                logging.info(f"Deleted snapshot {src_snapshot_id} in source account.")
+            except botocore.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == 'InvalidSnapshot.NotFound':
+                    logging.warning(f"Snapshot {src_snapshot_id} was already deleted or does not exist in the source account.")
+                else:
+                    raise
+
+            # Delete the destination snapshot
+            try:
+                ec2_client_dst.delete_snapshot(SnapshotId=dst_snapshot_id)
+                logging.info(f"Deleted snapshot {dst_snapshot_id} in destination account.")
+            except botocore.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == 'InvalidSnapshot.NotFound':
+                    logging.warning(f"Snapshot {dst_snapshot_id} was already deleted or does not exist in the destination account.")
+                else:
+                    raise
         else:
             logging.info(f"Retaining snapshots {src_snapshot_id} and {dst_snapshot_id}.")
     except Exception as e:
@@ -351,6 +399,45 @@ def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_n
         ec2_client = session.client('ec2')
         ssm_client = session.client('ssm')
 
+        # Unmount the --mount-path if it is currently mounted
+        logging.info(f"Checking if {mount_path} is currently mounted...")
+        check_mount_command = f"mount | grep -i {mount_path}"
+        check_mount_response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [check_mount_command]}
+        )
+        check_mount_command_id = check_mount_response['Command']['CommandId']
+        time.sleep(10)
+
+        check_mount_output = ssm_client.get_command_invocation(
+            CommandId=check_mount_command_id,
+            InstanceId=instance_id,
+            PluginName='aws:runShellScript'
+        )
+
+        if 'StandardOutputContent' in check_mount_output and check_mount_output['StandardOutputContent']:
+            logging.info(f"{mount_path} is currently mounted. Unmounting...")
+            unmount_command = f"sudo umount {mount_path}"
+            unmount_response = ssm_client.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={'commands': [unmount_command]}
+            )
+            unmount_command_id = unmount_response['Command']['CommandId']
+            time.sleep(10)
+
+            unmount_output = ssm_client.get_command_invocation(
+                CommandId=unmount_command_id,
+                InstanceId=instance_id,
+                PluginName='aws:runShellScript'
+            )
+
+            if 'StandardErrorContent' in unmount_output and unmount_output['StandardErrorContent']:
+                logging.error(f"Failed to unmount {mount_path}: {unmount_output['StandardErrorContent']}")
+                return None
+            logging.info(f"Unmounted {mount_path} successfully.")
+
         # Attach the volume to the instance
         device_name = find_available_device(ec2_client, instance_id)
         if not device_name:
@@ -363,17 +450,33 @@ def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_n
             Device=device_name
         )
 
-        logging.info(f"Volume {volume_id} attached to {instance_id} as {device_name}.")
+        logging.info(f"Volume {volume_id} attached to {instance_id} as {device_name}. Sleeping 30s to allow attachment recognition.")
 
-        # Wait for the volume to be attached
-        time.sleep(10)  # Give some time for the attachment to take place
+        # Wait for the volume to be attached and recognized by the instance
+        time.sleep(30)  # Increased delay to allow attachment recognition
 
-        # Check attached volumes
+        # Check attached volumes and get the correct device name
         attached_volumes = find_attached_volumes(instance_id, ssm_client)
         logging.info(f"Attached volumes: {attached_volumes}")
 
+        # Assuming last attached volume is the correct one
+        correct_device_name = attached_volumes[-3]  # Assuming the correct device name (e.g., nvmeXn1p1)
+
+        # Create the mount directory if it doesn't exist
+        create_dir_command = f"sudo mkdir -p {mount_path}"
+        create_dir_response = ssm_client.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            Parameters={'commands': [create_dir_command]}
+        )
+        create_dir_command_id = create_dir_response['Command']['CommandId']
+        logging.info(f"SSM command ID for creating directory: {create_dir_command_id}")
+
+        # Wait for the directory creation command to complete
+        time.sleep(10)
+
         # Run the mount command using SSM
-        mount_command = f"sudo mount {device_name}1 {mount_path}"  # Assuming first partition
+        mount_command = f"sudo mount /dev/{correct_device_name} {mount_path}"  # Using the correct device name
         response = ssm_client.send_command(
             InstanceIds=[instance_id],
             DocumentName="AWS-RunShellScript",
@@ -381,8 +484,23 @@ def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_n
         )
 
         command_id = response['Command']['CommandId']
+        logging.info(f"SSM command ID for mounting: {command_id}")
 
-        # Verify mount success
+        # Wait for command execution and fetch the command invocation
+        time.sleep(20)  # Allow time for command execution
+        command_output = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id,
+            PluginName='aws:runShellScript'
+        )
+
+        if command_output['Status'] == 'Success':
+            logging.info("Volume mounted successfully.")
+        else:
+            logging.error(f"SSM command failed with error: {command_output.get('StandardErrorContent', 'No error message available')}")
+            return None
+
+        # Verify the mount was successful
         verify_mount_command = f"ls {mount_path}"
         verify_response = ssm_client.send_command(
             InstanceIds=[instance_id],
@@ -398,17 +516,18 @@ def mount_ebs_volume(instance_id, volume_id, ssh_key_path, mount_path, profile_n
 
         if 'StandardOutputContent' in verify_command_output and verify_command_output['StandardOutputContent']:
             logging.info(f"Contents of {mount_path} after mounting: {verify_command_output['StandardOutputContent']}")
+            return mount_path
         else:
             logging.error(f"Failed to verify the mount or directory is empty: {mount_path}")
             return None
 
-        logging.info(f"Volume {volume_id} mounted to {mount_path} on {device_name}.")
-        return mount_path
-
+    except ssm_client.exceptions.InvocationDoesNotExist as e:
+        # Log the InvocationDoesNotExist error but proceed if the command has already succeeded
+        logging.error(f"InvocationDoesNotExist error for command ID: {command_id}. Ignoring since the command was executed successfully.")
+        return mount_path  # Proceed as the command succeeded
     except Exception as e:
         logging.error(f"Failed to attach and mount volume {volume_id} to {instance_id}: {str(e)}")
         return None
-
 
 def install_trufflehog_ssm(instance_id, ssm_client):
     try:
@@ -688,7 +807,7 @@ def main(src_profile, dst_profile, src_region, dst_region, list_ebs, list_ec2, m
                             save_trufflehog_output(mount_host, ssm_client_dst, out_file)
                         if not retain:
                             logging.debug(f"Deleting snapshot and volume after processing")
-                            delete_snapshot_and_volume(ec2_client_src, snapshot_id, snapshot_id, dst_volume_id)
+                            delete_snapshot_and_volume(ec2_client_src, ec2_client_dst, snapshot_id, snapshot_id, dst_volume_id)
                         else:
                             logging.info("Volume and snapshot retained.")
                     else:
