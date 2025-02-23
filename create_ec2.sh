@@ -9,10 +9,11 @@ key_name=""
 image_id=""
 instance_type=""
 security_group_id=""
+subnet_id=""
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 --profile PROFILENAME --region REGION --instance-profile INSTANCEPROFILE --ip-allowlist IPADDRESS --key KEYNAME --image-id AMIIMAGEID --instance-type INSTANCETYPE"
+    echo "Usage: $0 --profile PROFILENAME --region REGION --instance-profile INSTANCEPROFILE --ip-allowlist IPADDRESS --key KEYNAME --image-id AMIIMAGEID --instance-type INSTANCETYPE [--subnet-id SUBNETID]"
     exit 1
 }
 
@@ -55,6 +56,11 @@ while [[ $# -gt 0 ]]; do
             shift # past argument
             shift # past value
             ;;
+        --subnet-id)
+            subnet_id="$2"
+            shift # past argument
+            shift # past value
+            ;;
         *)
             echo "Unknown option: $key"
             usage
@@ -68,6 +74,39 @@ if [[ -z "$profile" || -z "$region" || -z "$instance_profile" || -z "$ip_allowli
     usage
 fi
 
+# If subnet_id is not provided, try to find a suitable subnet in the default VPC
+if [[ -z "$subnet_id" ]]; then
+    echo "No subnet specified, attempting to find a suitable subnet..."
+    
+    # Get default VPC ID
+    vpc_id=$(aws ec2 describe-vpcs \
+        --profile "$profile" \
+        --region "$region" \
+        --filters "Name=isDefault,Values=true" \
+        --query 'Vpcs[0].VpcId' \
+        --output text)
+    
+    if [[ -z "$vpc_id" || "$vpc_id" == "None" ]]; then
+        echo "No default VPC found. Please specify a subnet ID using --subnet-id"
+        exit 1
+    fi
+    
+    # Get first available subnet in the default VPC
+    subnet_id=$(aws ec2 describe-subnets \
+        --profile "$profile" \
+        --region "$region" \
+        --filters "Name=vpc-id,Values=$vpc_id" "Name=state,Values=available" \
+        --query 'Subnets[0].SubnetId' \
+        --output text)
+    
+    if [[ -z "$subnet_id" || "$subnet_id" == "None" ]]; then
+        echo "No suitable subnet found in VPC $vpc_id. Please specify a subnet ID using --subnet-id"
+        exit 1
+    fi
+    
+    echo "Using subnet: $subnet_id"
+fi
+
 # Launch the EC2 instance and retrieve its InstanceId, Public IP, and Security Group ID
 instance_info=$(aws ec2 run-instances \
     --profile "$profile" \
@@ -75,6 +114,7 @@ instance_info=$(aws ec2 run-instances \
     --image-id "$image_id" \
     --instance-type "$instance_type" \
     --key-name "$key_name" \
+    --subnet-id "$subnet_id" \
     --iam-instance-profile Name="$instance_profile" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=TrufflehogTesting}]" "ResourceType=volume,Tags=[{Key=Name,Value=TrufflehogTesting}]" \
     --query 'Instances[0].[InstanceId,PublicIpAddress,SecurityGroups[0].GroupId]' \

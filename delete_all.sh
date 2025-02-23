@@ -61,7 +61,7 @@ delete_volumes() {
             echo "Skipping root filesystem volume $volume_id"
             continue
         fi
-        
+
         echo "Deleting volume $volume_id..."
         aws ec2 delete-volume \
             --profile "$profile" \
