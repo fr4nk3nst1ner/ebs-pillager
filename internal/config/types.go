@@ -19,9 +19,9 @@ type Config struct {
 	Retain      bool
 	JSON        bool    // Enable JSON output format
 	OutFile     string
-	Transfer    bool
 	Debug       bool    // Enable debug logging
 	NoBanner    bool    // Disable banner display
+	ShowExamples bool   // Show example commands
 }
 
 // VolumeDetails represents information about an EBS volume

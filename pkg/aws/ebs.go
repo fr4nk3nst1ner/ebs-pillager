@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"ec2bandit/internal/config"
+	"ec2bandit/pkg/utils"
 )
 
 // EBSOperations handles EBS volume operations
@@ -70,80 +71,59 @@ func (e *EBSOperations) ListSnapshots(ctx context.Context) error {
 
 // CreateSnapshot creates a snapshot of the root volume of the specified instance
 func (e *EBSOperations) CreateSnapshot(ctx context.Context, instanceID string) (string, string, error) {
-	// First, get the instance details to find the root volume
-	instanceResp, err := e.srcClient.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+	// Get the instance details to find the root volume
+	resp, err := e.srcClient.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to describe instance: %w", err)
 	}
 
-	if len(instanceResp.Reservations) == 0 || len(instanceResp.Reservations[0].Instances) == 0 {
+	if len(resp.Reservations) == 0 || len(resp.Reservations[0].Instances) == 0 {
 		return "", "", fmt.Errorf("instance %s not found", instanceID)
 	}
 
-	instance := instanceResp.Reservations[0].Instances[0]
-	rootDevice := instance.RootDeviceName
+	instance := resp.Reservations[0].Instances[0]
+	var rootVolume *types.InstanceBlockDeviceMapping
 
-	// Find root volume ID
-	var rootVolumeID string
+	// Find the root volume
 	for _, mapping := range instance.BlockDeviceMappings {
-		if *mapping.DeviceName == *rootDevice {
-			rootVolumeID = *mapping.Ebs.VolumeId
+		if *mapping.DeviceName == *instance.RootDeviceName {
+			rootVolume = &mapping
 			break
 		}
 	}
 
-	if rootVolumeID == "" {
+	if rootVolume == nil || rootVolume.Ebs == nil {
 		return "", "", fmt.Errorf("root volume not found for instance %s", instanceID)
 	}
 
-	// Get KMS key ID if volume is encrypted
-	volumeResp, err := e.srcClient.EC2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
-		VolumeIds: []string{rootVolumeID},
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("failed to describe volume: %w", err)
-	}
-
-	var kmsKeyID string
-	if len(volumeResp.Volumes) > 0 && volumeResp.Volumes[0].KmsKeyId != nil {
-		kmsKeyID = *volumeResp.Volumes[0].KmsKeyId
-	}
-
-	// Create snapshot
-	createSnapshotInput := &ec2.CreateSnapshotInput{
-		VolumeId:    aws.String(rootVolumeID),
-		Description: aws.String("Snapshot for pillaging"),
+	// Create snapshot of the root volume
+	snapResp, err := e.srcClient.EC2.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{
+		VolumeId: rootVolume.Ebs.VolumeId,
+		Description: aws.String(fmt.Sprintf("Snapshot of root volume for instance %s", instanceID)),
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSnapshot,
 				Tags: []types.Tag{
 					{
 						Key:   aws.String("Name"),
-						Value: aws.String("TrufflehogTesting"),
+						Value: aws.String(fmt.Sprintf("ec2bandit-snapshot-%s", instanceID)),
 					},
 				},
 			},
 		},
-	}
-
-	snapshotResp, err := e.srcClient.EC2.CreateSnapshot(ctx, createSnapshotInput)
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	// Wait for snapshot to complete
-	waiter := ec2.NewSnapshotCompletedWaiter(e.srcClient.EC2)
-	err = waiter.Wait(ctx, &ec2.DescribeSnapshotsInput{
-		SnapshotIds: []string{*snapshotResp.SnapshotId},
-	}, 30*time.Minute)
-
-	if err != nil {
-		return "", "", fmt.Errorf("failed waiting for snapshot completion: %w", err)
+	// Wait for snapshot to be available
+	if err := e.WaitForSnapshotAvailable(ctx, *snapResp.SnapshotId); err != nil {
+		return "", "", fmt.Errorf("failed waiting for snapshot to be available: %w", err)
 	}
 
-	return *snapshotResp.SnapshotId, kmsKeyID, nil
+	return *snapResp.SnapshotId, aws.ToString(snapResp.KmsKeyId), nil
 }
 
 // ShareSnapshot shares a snapshot with another account
@@ -168,29 +148,69 @@ func (e *EBSOperations) ShareSnapshot(ctx context.Context, snapshotID, accountID
 	return nil
 }
 
+// WaitForSnapshotAvailable waits for a snapshot to become available
+func (e *EBSOperations) WaitForSnapshotAvailable(ctx context.Context, snapshotID string) error {
+	utils.Debug("Waiting for snapshot %s to become available...", snapshotID)
+	
+	maxAttempts := 60 // 10 minutes with 10-second intervals
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		resp, err := e.srcClient.EC2.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
+			SnapshotIds: []string{snapshotID},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to describe snapshot: %w", err)
+		}
+
+		if len(resp.Snapshots) == 0 {
+			return fmt.Errorf("snapshot %s not found", snapshotID)
+		}
+
+		snapshot := resp.Snapshots[0]
+		utils.Debug("Snapshot state: %s", snapshot.State)
+
+		if snapshot.State == types.SnapshotStateCompleted {
+			return nil
+		} else if snapshot.State == types.SnapshotStateError {
+			return fmt.Errorf("snapshot entered error state")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+			// Continue waiting
+		}
+	}
+
+	return fmt.Errorf("timed out waiting for snapshot to become available")
+}
+
 // CreateVolumeFromSnapshot creates a new volume from a snapshot
 func (e *EBSOperations) CreateVolumeFromSnapshot(ctx context.Context, snapshotID, availabilityZone string) (string, error) {
+	// Wait for snapshot to be available before creating volume
+	if err := e.WaitForSnapshotAvailable(ctx, snapshotID); err != nil {
+		return "", fmt.Errorf("failed waiting for snapshot to be available: %w", err)
+	}
+
 	input := &ec2.CreateVolumeInput{
 		SnapshotId:       aws.String(snapshotID),
 		AvailabilityZone: aws.String(availabilityZone),
 	}
 
-	result, err := e.dstClient.EC2.CreateVolume(ctx, input)
+	resp, err := e.dstClient.EC2.CreateVolume(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("failed to create volume: %w", err)
 	}
 
-	// Wait for the volume to become available
+	// Wait for volume to be available
 	waiter := ec2.NewVolumeAvailableWaiter(e.dstClient.EC2)
-	err = waiter.Wait(ctx, &ec2.DescribeVolumesInput{
-		VolumeIds: []string{*result.VolumeId},
-	}, 5*time.Minute)
-
-	if err != nil {
-		return "", fmt.Errorf("failed waiting for volume to become available: %w", err)
+	if err := waiter.Wait(ctx, &ec2.DescribeVolumesInput{
+		VolumeIds: []string{*resp.VolumeId},
+	}, 5*time.Minute); err != nil {
+		return "", fmt.Errorf("failed waiting for volume to be available: %w", err)
 	}
 
-	return *result.VolumeId, nil
+	return *resp.VolumeId, nil
 }
 
 // DeleteSnapshotAndVolume deletes the specified snapshot and volume

