@@ -29,7 +29,7 @@ func InitLogging(debug bool) error {
 
 	// Set standard logger format for backward compatibility
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
-	log.SetPrefix("[ebs-pillage] ")
+	log.SetPrefix("[ec2bandit] ")
 	
 	return nil
 }

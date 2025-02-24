@@ -40,6 +40,11 @@ func (s *Scanner) ScanVolume(ctx context.Context, instanceID, mountPath, pillage
 		return fmt.Errorf("scan failed: %w", err)
 	}
 
+	// Save or print the scan output
+	if err := s.SaveOutput(ctx, instanceID, ""); err != nil {
+		return fmt.Errorf("failed to save scan output: %w", err)
+	}
+
 	// Finally unmount
 	if err := s.unmountVolume(ctx, instanceID, mountPath); err != nil {
 		return fmt.Errorf("failed to unmount volume: %w", err)
@@ -231,7 +236,7 @@ func (s *Scanner) runScan(ctx context.Context, instanceID, mountPath, pillagePat
 	return s.ssmOps.RunCommand(ctx, instanceID, scanCmd, 3600)
 }
 
-// SaveOutput saves the scan output to a file
+// SaveOutput saves the scan output to a file or prints to stdout
 func (s *Scanner) SaveOutput(ctx context.Context, instanceID, outFile string) error {
 	// Get the command output from the instance
 	getOutputCmd := `
@@ -258,6 +263,12 @@ func (s *Scanner) SaveOutput(ctx context.Context, instanceID, outFile string) er
 	// Run command to get output with custom handler
 	if err := s.ssmOps.RunCommandWithOutput(ctx, instanceID, getOutputCmd, 300, outputHandler); err != nil {
 		return fmt.Errorf("failed to get Trufflehog output: %w", err)
+	}
+
+	// If no output file is specified, print to stdout
+	if outFile == "" {
+		fmt.Print(output.String())
+		return nil
 	}
 
 	// Write the captured output to the local file
