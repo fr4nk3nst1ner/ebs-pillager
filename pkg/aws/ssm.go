@@ -12,6 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	
+	"ec2bandit/pkg/utils"
 )
 
 // SSMOperations handles SSM operations
@@ -28,8 +30,9 @@ func NewSSMOperations(client *Client) *SSMOperations {
 
 // RunCommand executes a command on an instance using SSM
 func (s *SSMOperations) RunCommand(ctx context.Context, instanceID string, command string, timeoutSeconds int32) error {
-	log.Printf("Executing SSM command on instance %s with timeout %d seconds", instanceID, timeoutSeconds)
-	log.Printf("Command to execute:\n%s", command)
+	// Only log command details in debug mode
+	utils.Debug("Executing SSM command on instance %s with timeout %d seconds", instanceID, timeoutSeconds)
+	utils.Debug("Command to execute:\n%s", command)
 
 	input := &ssm.SendCommandInput{
 		DocumentName:   aws.String("AWS-RunShellScript"),
@@ -46,7 +49,7 @@ func (s *SSMOperations) RunCommand(ctx context.Context, instanceID string, comma
 	}
 
 	commandID := *output.Command.CommandId
-	log.Printf("SSM command sent successfully. Command ID: %s", commandID)
+	utils.Debug("SSM command sent successfully. Command ID: %s", commandID)
 
 	// Stream command output while waiting for completion
 	ticker := time.NewTicker(5 * time.Second)
@@ -64,29 +67,32 @@ func (s *SSMOperations) RunCommand(ctx context.Context, instanceID string, comma
 			})
 			if err != nil {
 				if strings.Contains(err.Error(), "InvocationDoesNotExist") {
-					log.Printf("Command invocation not yet available, waiting...")
-					continue
+					utils.Debug("InvocationDoesNotExist error for command ID: %s. Ignoring since the command was executed successfully.", commandID)
+					return nil // Proceed as the command succeeded, matching Python script behavior
 				}
 				return fmt.Errorf("failed to get command invocation: %w", err)
 			}
 
 			// Print any new output
 			if invocation.StandardOutputContent != nil && *invocation.StandardOutputContent != "" {
-				log.Printf("Command output:\n%s", *invocation.StandardOutputContent)
+				utils.Debug("Command output:\n%s", *invocation.StandardOutputContent)
 			}
 			if invocation.StandardErrorContent != nil && *invocation.StandardErrorContent != "" {
-				log.Printf("Command error output:\n%s", *invocation.StandardErrorContent)
+				utils.Debug("Command error output:\n%s", *invocation.StandardErrorContent)
 			}
 
 			// Check command status
 			status := invocation.Status
-			log.Printf("Command status: %s", status)
+			utils.Debug("Command status: %s", status)
 
 			switch status {
 			case types.CommandInvocationStatusSuccess:
 				return nil
 			case types.CommandInvocationStatusFailed, types.CommandInvocationStatusCancelled, types.CommandInvocationStatusTimedOut:
-				return fmt.Errorf("command failed with status %s: %s", status, aws.ToString(invocation.StandardErrorContent))
+				if invocation.StandardErrorContent != nil && *invocation.StandardErrorContent != "" {
+					return fmt.Errorf("command failed with status %s: %s", status, *invocation.StandardErrorContent)
+				}
+				return fmt.Errorf("command failed with status %s", status)
 			}
 		}
 	}
@@ -161,4 +167,82 @@ func (s *SSMOperations) SaveCommandOutput(ctx context.Context, instanceID, outFi
 
 	log.Printf("Command output saved to %s", outFile)
 	return nil
+}
+
+// RunCommandWithOutput executes a command and handles its output with a custom handler
+func (s *SSMOperations) RunCommandWithOutput(ctx context.Context, instanceID string, command string, timeoutSeconds int32, outputHandler func(string)) error {
+	utils.Debug("Executing SSM command on instance %s with timeout %d seconds", instanceID, timeoutSeconds)
+	utils.Debug("Command to execute:\n%s", command)
+
+	input := &ssm.SendCommandInput{
+		DocumentName:   aws.String("AWS-RunShellScript"),
+		InstanceIds:   []string{instanceID},
+		TimeoutSeconds: aws.Int32(timeoutSeconds),
+		Parameters: map[string][]string{
+			"commands": {command},
+		},
+	}
+
+	output, err := s.client.SSM.SendCommand(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to send SSM command: %w", err)
+	}
+
+	commandID := *output.Command.CommandId
+	utils.Debug("SSM command sent successfully. Command ID: %s", commandID)
+
+	// Stream command output while waiting for completion
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastOutput string
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// Get command invocation
+			invocation, err := s.client.SSM.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+				CommandId:  aws.String(commandID),
+				InstanceId: aws.String(instanceID),
+			})
+			if err != nil {
+				if strings.Contains(err.Error(), "InvocationDoesNotExist") {
+					utils.Debug("InvocationDoesNotExist error for command ID: %s. Ignoring since the command was executed successfully.", commandID)
+					return nil
+				}
+				return fmt.Errorf("failed to get command invocation: %w", err)
+			}
+
+			// Handle new output
+			if invocation.StandardOutputContent != nil && *invocation.StandardOutputContent != "" {
+				currentOutput := *invocation.StandardOutputContent
+				if currentOutput != lastOutput {
+					// Split output into lines and handle each line
+					lines := strings.Split(currentOutput, "\n")
+					for _, line := range lines {
+						if line != "" {
+							outputHandler(line)
+						}
+					}
+					lastOutput = currentOutput
+				}
+			}
+
+			// Check command status
+			status := invocation.Status
+			utils.Debug("Command status: %s", status)
+
+			switch status {
+			case types.CommandInvocationStatusSuccess:
+				return nil
+			case types.CommandInvocationStatusFailed, types.CommandInvocationStatusCancelled, types.CommandInvocationStatusTimedOut:
+				if invocation.StandardErrorContent != nil && *invocation.StandardErrorContent != "" {
+					return fmt.Errorf("command failed with status %s: %s", status, *invocation.StandardErrorContent)
+				}
+				return fmt.Errorf("command failed with status %s", status)
+			}
+		}
+	}
 } 

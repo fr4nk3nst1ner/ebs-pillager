@@ -1,0 +1,27 @@
+project_name: cloudsnitch
+
+builds:
+  - id: ec2bandit
+    main: ./ec2bandit.go
+    binary: ec2bandit
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: fr4nk3nst1ner
+    name: ec2bandit

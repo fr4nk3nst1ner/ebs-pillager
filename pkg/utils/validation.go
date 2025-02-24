@@ -3,7 +3,7 @@ package utils
 import (
 	"fmt"
 
-	"ebs-pillage/internal/config"
+	"ec2bandit/internal/config"
 )
 
 // ValidateConfig validates the application configuration
