@@ -21,6 +21,7 @@ type Config struct {
 	OutFile     string
 	Transfer    bool
 	Debug       bool    // Enable debug logging
+	NoBanner    bool    // Disable banner display
 }
 
 // VolumeDetails represents information about an EBS volume

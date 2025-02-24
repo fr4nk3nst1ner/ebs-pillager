@@ -1,4 +1,4 @@
-module ebs-pillage
+module ec2bandit
 
 go 1.21
 

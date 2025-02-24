@@ -9,14 +9,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	
-	"ebs-pillage/internal/config"
-	"ebs-pillage/pkg/aws"
-	"ebs-pillage/pkg/banner"
-	"ebs-pillage/pkg/trufflehog"
-	"ebs-pillage/pkg/utils"
+	"ec2bandit/internal/config"
+	"ec2bandit/pkg/aws"
+	"ec2bandit/pkg/banner"
+	"ec2bandit/pkg/trufflehog"
+	"ec2bandit/pkg/utils"
 )
 
 func main() {
+	// Print banner by default
+	banner.Print(false)
+
 	cfg := &config.Config{}
 
 	// Command line flags
@@ -38,8 +41,10 @@ func main() {
 
 	flag.Parse()
 
-	// Display banner unless disabled
-	banner.Print(cfg.NoBanner)
+	// If -no-banner was passed, clear the screen
+	if cfg.NoBanner {
+		fmt.Print("\033[H\033[2J")
+	}
 
 	// Initialize logging with debug flag
 	if err := utils.InitLogging(cfg.Debug); err != nil {
@@ -63,7 +68,7 @@ func main() {
 
 func run(cfg *config.Config) error {
 	ctx := context.Background()
-	utils.Info("Starting ebs-pillage...")
+	utils.Info("Starting ec2bandit...")
 	utils.Debug("Initializing AWS services...")
 
 	// Initialize AWS services

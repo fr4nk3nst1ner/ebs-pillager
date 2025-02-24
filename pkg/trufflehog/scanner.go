@@ -3,9 +3,12 @@ package trufflehog
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"path/filepath"
 
-	"ebs-pillage/pkg/aws"
+	"ec2bandit/pkg/aws"
+	"ec2bandit/pkg/utils"
 )
 
 // Scanner represents a Trufflehog scanner
@@ -205,7 +208,14 @@ func (s *Scanner) runScan(ctx context.Context, instanceID, mountPath, pillagePat
 		# Run Trufflehog scan and save output
 		echo "Running Trufflehog scan on $SEARCH_PATH"
 		cd "$SEARCH_PATH"
-		/tmp/trufflehog filesystem --no-verification --concurrency=5 %s . > /tmp/trufflehog.out
+		
+		# Clear any existing output file
+		rm -f /tmp/trufflehog.out
+		
+		# Run Trufflehog and capture only its output
+		{
+			/tmp/trufflehog filesystem --no-verification --concurrency=5 %s .
+		} > /tmp/trufflehog.out 2>&1
 		
 		# Check if output file was created and has content
 		if [ ! -f /tmp/trufflehog.out ]; then
@@ -213,11 +223,9 @@ func (s *Scanner) runScan(ctx context.Context, instanceID, mountPath, pillagePat
 			exit 1
 		fi
 
-		# Print file size and first few lines for verification
+		# Print file size for verification
 		echo "Trufflehog output file size:"
 		ls -l /tmp/trufflehog.out
-		echo "First few lines of output:"
-		head -n 5 /tmp/trufflehog.out
 	`, mountPath, mountPath, searchPath, mountPath, jsonFlag)
 
 	return s.ssmOps.RunCommand(ctx, instanceID, scanCmd, 3600)
@@ -235,14 +243,29 @@ func (s *Scanner) SaveOutput(ctx context.Context, instanceID, outFile string) er
 			exit 1
 		fi
 
+		# Only output the Trufflehog results
 		cat /tmp/trufflehog.out
 	`
 
-	// Run command to get output
-	if err := s.ssmOps.RunCommand(ctx, instanceID, getOutputCmd, 300); err != nil {
+	// Create a buffer to store the command output
+	var output strings.Builder
+
+	// Create a custom handler for the command output
+	outputHandler := func(line string) {
+		output.WriteString(line + "\n")
+	}
+
+	// Run command to get output with custom handler
+	if err := s.ssmOps.RunCommandWithOutput(ctx, instanceID, getOutputCmd, 300, outputHandler); err != nil {
 		return fmt.Errorf("failed to get Trufflehog output: %w", err)
 	}
 
+	// Write the captured output to the local file
+	if err := os.WriteFile(outFile, []byte(output.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write output to file: %w", err)
+	}
+
+	utils.Info("Scan output saved to: %s", outFile)
 	return nil
 }
 
