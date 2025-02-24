@@ -2,3 +2,4 @@ venv/
 trufflehog.out
 *.bak
 kms-key-policy.json
+ebspillage.py

@@ -63,137 +63,69 @@ func (s *Scanner) mountVolume(ctx context.Context, instanceID, mountPath, device
 			exit 1
 		fi
 
-		# Wait for the device to settle after attachment
-		echo "Waiting 10 seconds for device to settle..."
-		sleep 10
-
-		# Force kernel to re-read partition table
-		echo "Forcing kernel to re-read partition table..."
-		sudo partprobe || true
-
-		# Show initial device state
-		echo "Initial block device state:"
-		sudo lsblk -o NAME,SERIAL,TYPE,SIZE,MOUNTPOINT,LABEL
-		sudo blkid
-
-		# Function to convert xvd device to potential nvme device
-		get_nvme_device() {
-			local xvd_name="$1"
-			local device_letter="${xvd_name#/dev/xvd}"
-			local index=14  # Default to 14 for 'bo'
-			echo "/dev/nvme${index}n1"
-		}
-
-		# Try to find the actual device
-		DEVICE_NAME=""
-		EXPECTED_NVME=$(get_nvme_device "%s")
-		echo "Looking for device: %s (expected NVMe: $EXPECTED_NVME)"
-
-		# First try the original device name
-		if [ -b "%s" ]; then
-			DEVICE_NAME="%s"
-		# Then try the expected NVMe name
-		elif [ -b "$EXPECTED_NVME" ]; then
-			DEVICE_NAME="$EXPECTED_NVME"
-		else
-			# List all block devices if we can't find it directly
-			echo "Device not found directly, checking all devices..."
-			for dev in /dev/nvme*n1; do
-				if [ -b "$dev" ]; then
-					echo "Found block device: $dev"
-					DEVICE_NAME="$dev"
-					break
-				fi
-			done
-		fi
-
-		if [ -z "$DEVICE_NAME" ]; then
-			echo "Failed to find device"
-			echo "Available devices:"
-			ls -l /dev/nvme*n1 2>/dev/null || true
-			echo "Device details:"
-			sudo lsblk -J | jq .
-			exit 1
-		fi
-
-		echo "Using device: $DEVICE_NAME"
-
-		# Check if device exists
-		if [ ! -b "$DEVICE_NAME" ]; then
-			echo "Device $DEVICE_NAME does not exist"
-			echo "Available devices:"
-			ls -l /dev/nvme*n1 2>/dev/null || true
-			echo "Kernel messages:"
-			dmesg | tail -n 50
-			exit 1
-		fi
-
-		# Wait for partitions to appear
-		echo "Waiting for partitions to appear..."
-		for i in {1..10}; do
-			if [ -b "${DEVICE_NAME}p1" ]; then
-				echo "Found partition ${DEVICE_NAME}p1"
-				DEVICE_NAME="${DEVICE_NAME}p1"
-				break
+		# Check if mount path is currently mounted
+		echo "Checking if %s is currently mounted..."
+		if mount | grep -i %s; then
+			echo "%s is currently mounted. Unmounting..."
+			sudo umount %s
+			if [ $? -ne 0 ]; then
+				echo "Failed to unmount %s"
+				exit 1
 			fi
-			echo "Attempt $i: Partition not found, waiting..."
-			sleep 1
-		done
+			echo "Unmounted %s successfully."
+		fi
 
-		if [ ! -b "$DEVICE_NAME" ]; then
-			echo "Failed to find partition after 10 attempts"
+		# Get list of currently attached NVMe volumes
+		echo "Getting list of attached NVMe volumes..."
+		ATTACHED_VOLUMES=$(lsblk --json | jq -r '.blockdevices[] | select(.name | startswith("nvme")) | select(.children != null) | .children[] | select(.name | startswith("nvme")) | .name')
+		echo "Currently attached volumes: $ATTACHED_VOLUMES"
+
+		# Wait for the device to settle after attachment
+		echo "Waiting 30 seconds for device to settle..."
+		sleep 30
+
+		# Get updated list of NVMe volumes and find the last attached one
+		NEW_VOLUMES=$(lsblk --json | jq -r '.blockdevices[] | select(.name | startswith("nvme")) | select(.children != null) | .children[] | select(.name | startswith("nvme")) | .name')
+		CORRECT_DEVICE=$(echo "$NEW_VOLUMES" | tail -n 3 | head -n 1)
+
+		if [ -z "$CORRECT_DEVICE" ]; then
+			echo "Failed to find the correct device"
 			echo "Available devices:"
-			ls -l /dev/nvme*n1* 2>/dev/null || true
+			lsblk --json | jq .
 			exit 1
 		fi
 
-		MOUNT_PATH="%s"
-
-		# Check if mount point exists and is mounted
-		if mountpoint -q "$MOUNT_PATH"; then
-			echo "Mount point $MOUNT_PATH is already mounted, unmounting first..."
-			sudo umount "$MOUNT_PATH" || true
-		fi
+		echo "Using device: $CORRECT_DEVICE"
 
 		# Create mount directory if it doesn't exist
-		sudo mkdir -p "$MOUNT_PATH"
+		echo "Creating mount directory..."
+		sudo mkdir -p %s
 		if [ $? -ne 0 ]; then
 			echo "Failed to create mount directory"
 			exit 1
 		fi
 
-		# Get filesystem details before mounting
-		echo "Filesystem details for $DEVICE_NAME:"
-		sudo blkid "$DEVICE_NAME" || true
-		sudo file -sL "$DEVICE_NAME" || true
-
-		# Try to mount with different options
-		echo "Attempting to mount $DEVICE_NAME to $MOUNT_PATH"
-		if ! sudo mount -t ext4 -o ro "$DEVICE_NAME" "$MOUNT_PATH"; then
-			echo "First mount attempt failed, trying without specifying filesystem type..."
-			if ! sudo mount -o ro "$DEVICE_NAME" "$MOUNT_PATH"; then
-				echo "Both mount attempts failed"
-				echo "Mount error details:"
-				sudo dmesg | tail -n 50
-				echo "Filesystem details:"
-				sudo blkid "$DEVICE_NAME" || true
-				sudo file -sL "$DEVICE_NAME" || true
-				exit 1
-			fi
-		fi
-
-		# Verify mount was successful
-		if ! mountpoint -q "$MOUNT_PATH"; then
-			echo "Mount verification failed"
-			echo "Current mounts:"
-			mount | grep "$MOUNT_PATH"
+		# Mount the volume
+		echo "Mounting /dev/$CORRECT_DEVICE to %s..."
+		sudo mount /dev/$CORRECT_DEVICE %s
+		if [ $? -ne 0 ]; then
+			echo "Mount command failed"
+			echo "Mount error details:"
+			dmesg | tail -n 50
 			exit 1
 		fi
 
-		echo "Successfully mounted $DEVICE_NAME to $MOUNT_PATH"
-		df -h "$MOUNT_PATH"
-		sudo ls -la "$MOUNT_PATH"
-	`, deviceName, deviceName, deviceName, deviceName, mountPath)
+		# Verify the mount was successful
+		echo "Verifying mount..."
+		if ! ls %s > /dev/null; then
+			echo "Failed to verify mount or directory is empty"
+			exit 1
+		fi
+
+		echo "Successfully mounted volume to %s"
+		echo "Contents of mount path:"
+		ls -la %s
+	`, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath, mountPath)
 
 	return s.ssmOps.RunCommand(ctx, instanceID, mountCmd, 300)
 }

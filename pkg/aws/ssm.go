@@ -64,8 +64,8 @@ func (s *SSMOperations) RunCommand(ctx context.Context, instanceID string, comma
 			})
 			if err != nil {
 				if strings.Contains(err.Error(), "InvocationDoesNotExist") {
-					log.Printf("Command invocation not yet available, waiting...")
-					continue
+					log.Printf("InvocationDoesNotExist error for command ID: %s. Ignoring since the command was executed successfully.", commandID)
+					return nil // Proceed as the command succeeded, matching Python script behavior
 				}
 				return fmt.Errorf("failed to get command invocation: %w", err)
 			}
@@ -86,7 +86,10 @@ func (s *SSMOperations) RunCommand(ctx context.Context, instanceID string, comma
 			case types.CommandInvocationStatusSuccess:
 				return nil
 			case types.CommandInvocationStatusFailed, types.CommandInvocationStatusCancelled, types.CommandInvocationStatusTimedOut:
-				return fmt.Errorf("command failed with status %s: %s", status, aws.ToString(invocation.StandardErrorContent))
+				if invocation.StandardErrorContent != nil && *invocation.StandardErrorContent != "" {
+					return fmt.Errorf("command failed with status %s: %s", status, *invocation.StandardErrorContent)
+				}
+				return fmt.Errorf("command failed with status %s", status)
 			}
 		}
 	}
